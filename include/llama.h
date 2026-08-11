@@ -219,6 +219,10 @@ extern "C" {
     };
 
     enum llama_compute_profile {
+        // Selects the thread count and threadpool used to compute each physical ubatch.
+        // This does not change batching, graph construction, or decode semantics.
+        // See docs/development/compute-profile.md.
+
         // Preserve the original llama.cpp behavior.
         // Each physical ubatch uses:
         // n_tokens == 1 -> generation profile
@@ -998,7 +1002,7 @@ extern "C" {
             struct llama_context * ctx,
               struct llama_batch   batch);
 
-    // Same as llama_decode(), but accepts per-call options.
+    // Same as llama_decode(), but accepts options that apply to every physical ubatch in this call.
     // Returns -1 if options.compute_profile is invalid.
     LLAMA_API int32_t llama_decode_with_options(
             struct llama_context * ctx,
