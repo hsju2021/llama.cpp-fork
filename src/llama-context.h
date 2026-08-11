@@ -24,6 +24,27 @@ class llama_io_write_i;
 struct llama_memory_i;
 struct llama_memory_context_i;
 
+inline bool llama_compute_profile_is_valid(llama_compute_profile compute_profile) {
+    switch (compute_profile) {
+        case LLAMA_COMPUTE_PROFILE_AUTO:
+        case LLAMA_COMPUTE_PROFILE_GENERATION:
+        case LLAMA_COMPUTE_PROFILE_BATCH:
+            return true;
+    }
+
+    return false;
+}
+
+inline llama_compute_profile llama_compute_profile_resolve(llama_compute_profile compute_profile, uint32_t n_tokens) {
+    GGML_ASSERT(llama_compute_profile_is_valid(compute_profile));
+
+    if (compute_profile == LLAMA_COMPUTE_PROFILE_AUTO) {
+        return n_tokens > 1 ? LLAMA_COMPUTE_PROFILE_BATCH : LLAMA_COMPUTE_PROFILE_GENERATION;
+    }
+
+    return compute_profile;
+}
+
 // stores copy of the memory in device buffer. used for fast state save/load
 struct llama_memory_buffer {
     int n_tensors = 0;
@@ -138,10 +159,11 @@ struct llama_context {
                 const llama_ubatch & ubatch,
                     llm_graph_type   gtype,
             llama_memory_context_i * mctx,
-                       ggml_status & ret);
+                       ggml_status & ret,
+             llama_compute_profile   compute_profile);
 
     int encode(const llama_batch & batch_inp);
-    int decode(const llama_batch & batch_inp);
+    int decode(const llama_batch & batch_inp, llama_compute_profile compute_profile);
 
     //
     // state save/load
@@ -245,7 +267,10 @@ public:
     llm_graph_result * get_gf_res_reserve() const;
 
     // returns the result of ggml_backend_sched_graph_compute_async execution
-    ggml_status graph_compute(ggml_cgraph * gf, bool batched);
+    ggml_status graph_compute(
+                 ggml_cgraph * gf,
+        llama_compute_profile   compute_profile,
+                     uint32_t   n_tokens);
 
     // reserve a graph with a dummy ubatch of the specified size
     ggml_cgraph * graph_reserve(
