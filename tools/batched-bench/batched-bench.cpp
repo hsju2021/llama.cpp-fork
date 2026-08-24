@@ -9,9 +9,19 @@
 #include <string>
 #include <vector>
 
+static const char * compute_profile_name(llama_compute_profile profile) {
+    switch (profile) {
+        case LLAMA_COMPUTE_PROFILE_AUTO:       return "auto";
+        case LLAMA_COMPUTE_PROFILE_GENERATION: return "generation";
+        case LLAMA_COMPUTE_PROFILE_BATCH:      return "batch";
+    }
+
+    return "invalid";
+}
+
 static void print_usage(int, char ** argv) {
     LOG("\nexample usage:\n");
-    LOG("\n    %s -m model.gguf -c 2048 -b 2048 -ub 512 -npp 128,256,512 -ntg 128,256 -npl 1,2,4,8,16,32 [-pps]\n", argv[0]);
+    LOG("\n    %s -m model.gguf -c 2048 -b 2048 -ub 512 -npp 128,256,512 -ntg 128,256 -npl 1,2,4,8,16,32 [-pps] --pp-compute-profile auto --tg-compute-profile auto\n", argv[0]);
     LOG("\n");
 }
 
@@ -78,8 +88,16 @@ int llama_batched_bench(int argc, char ** argv) {
 
     llama_batch batch = llama_batch_init(n_kv_max, 0, 1);
 
+    llama_decode_options auto_options = llama_decode_default_options();
+    llama_decode_options pp_options   = llama_decode_default_options();
+    llama_decode_options tg_options   = llama_decode_default_options();
+
+    auto_options.compute_profile = LLAMA_COMPUTE_PROFILE_AUTO;
+    pp_options.compute_profile   = params.batched_bench_pp_compute_profile;
+    tg_options.compute_profile   = params.batched_bench_tg_compute_profile;
+
     // decode in batches of ctx_params.n_batch tokens
-    auto decode_helper = [](llama_context * ctx, llama_batch & batch, int32_t n_batch, bool synchronize) {
+    auto decode_helper = [](llama_context * ctx, llama_batch & batch, int32_t n_batch, bool synchronize, const llama_decode_options & options) {
         for (int32_t i = 0; i < batch.n_tokens; i += n_batch) {
             const int32_t n_tokens = std::min(n_batch, batch.n_tokens - i);
 
@@ -93,7 +111,7 @@ int llama_batched_bench(int argc, char ** argv) {
                 batch.logits   + i,
             };
 
-            const int ret = llama_decode(ctx, batch_view);
+            const int ret = llama_decode_with_options(ctx, batch_view, options);
             if (ret != 0) {
                 LOG_ERR("failed to decode the batch, n_batch = %d, ret = %d\n", n_batch, ret);
                 return false;
@@ -113,7 +131,7 @@ int llama_batched_bench(int argc, char ** argv) {
             common_batch_add(batch, get_token_rand(), i, { 0 }, false);
         }
 
-        if (!decode_helper(ctx, batch, ctx_params.n_batch, true)) {
+        if (!decode_helper(ctx, batch, ctx_params.n_batch, true, auto_options)) {
             LOG_ERR("%s: llama_decode() failed\n", __func__);
             llama_free(ctx);
             llama_model_free(model);
@@ -123,10 +141,10 @@ int llama_batched_bench(int argc, char ** argv) {
 
     if (!params.batched_bench_output_jsonl) {
         LOG("\n");
-        LOG("%s: n_kv_max = %d, n_batch = %d, n_ubatch = %d, flash_attn = %d, is_pp_shared = %d, is_tg_separate = %d, n_gpu_layers = %d, n_threads = %u, n_threads_batch = %u\n", __func__, n_kv_max, params.n_batch, params.n_ubatch, int(params.flash_attn_type), is_pp_shared, is_tg_separate, params.n_gpu_layers, ctx_params.n_threads, ctx_params.n_threads_batch);
+        LOG("%s: n_kv_max = %d, n_batch = %d, n_ubatch = %d, flash_attn = %d, is_pp_shared = %d, is_tg_separate = %d, n_gpu_layers = %d, n_threads = %u, n_threads_batch = %u, pp_compute_profile = %s, tg_compute_profile = %s\n", __func__, n_kv_max, params.n_batch, params.n_ubatch, int(params.flash_attn_type), is_pp_shared, is_tg_separate, params.n_gpu_layers, ctx_params.n_threads, ctx_params.n_threads_batch, compute_profile_name(pp_options.compute_profile), compute_profile_name(tg_options.compute_profile));
         LOG("\n");
-        LOG("|%6s | %6s | %4s | %6s | %8s | %8s | %8s | %8s | %8s | %8s |\n", "PP", "TG", "B", "N_KV", "T_PP s", "S_PP t/s", "T_TG s", "S_TG t/s", "T s", "S t/s");
-        LOG("|%6s-|-%6s-|-%4s-|-%6s-|-%8s-|-%8s-|-%8s-|-%8s-|-%8s-|-%8s-|\n", "------", "------", "----", "------", "--------", "--------", "--------", "--------", "--------", "--------");
+        LOG("|%6s | %6s | %4s | %6s | %8s | %8s | %8s | %8s | %8s | %8s | %10s | %10s |\n", "PP", "TG", "B", "N_KV", "T_PP s", "S_PP t/s", "T_TG s", "S_TG t/s", "T s", "S t/s", "PP_PROFILE", "TG_PROFILE");
+        LOG("|%6s-|-%6s-|-%4s-|-%6s-|-%8s-|-%8s-|-%8s-|-%8s-|-%8s-|-%8s-|-%10s-|-%10s-|\n", "------", "------", "----", "------", "--------", "--------", "--------", "--------", "--------", "--------", "----------", "----------");
     }
 
     for (        int i_pp = 0; i_pp < (int) n_pp.size(); ++i_pp) {
@@ -154,7 +172,7 @@ int llama_batched_bench(int argc, char ** argv) {
 
                 const auto t_pp_start = ggml_time_us();
 
-                if (!decode_helper(ctx, batch, ctx_params.n_batch, false)) {
+                if (!decode_helper(ctx, batch, ctx_params.n_batch, false, pp_options)) {
                     LOG_ERR("%s: llama_decode() failed\n", __func__);
                     llama_free(ctx);
                     llama_model_free(model);
@@ -174,7 +192,7 @@ int llama_batched_bench(int argc, char ** argv) {
                         // run one dummy token to apply the memory copy
                         common_batch_clear(batch);
                         common_batch_add(batch, get_token_rand(), pp + 0, { 0 }, true);
-                        if (!decode_helper(ctx, batch, ctx_params.n_batch, true)) {
+                        if (!decode_helper(ctx, batch, ctx_params.n_batch, true, auto_options)) {
                             LOG_ERR("%s: llama_decode() failed\n", __func__);
                             llama_free(ctx);
                             llama_model_free(model);
@@ -195,7 +213,7 @@ int llama_batched_bench(int argc, char ** argv) {
 
                             common_batch_add(batch, get_token_rand(), pp + i, { j }, true);
 
-                            if (!decode_helper(ctx, batch, ctx_params.n_batch, true)) {
+                            if (!decode_helper(ctx, batch, ctx_params.n_batch, true, tg_options)) {
                                 LOG_ERR("%s: llama_decode() failed\n", __func__);
                                 llama_free(ctx);
                                 llama_model_free(model);
@@ -213,7 +231,7 @@ int llama_batched_bench(int argc, char ** argv) {
                             common_batch_add(batch, get_token_rand(), pp + i, { j }, true);
                         }
 
-                        if (!decode_helper(ctx, batch, ctx_params.n_batch, true)) {
+                        if (!decode_helper(ctx, batch, ctx_params.n_batch, true, tg_options)) {
                             LOG_ERR("%s: llama_decode() failed\n", __func__);
                             llama_free(ctx);
                             llama_model_free(model);
@@ -237,12 +255,13 @@ int llama_batched_bench(int argc, char ** argv) {
                 if(params.batched_bench_output_jsonl) {
                     LOG(
                         "{\"n_kv_max\": %d, \"n_batch\": %d, \"n_ubatch\": %d, \"flash_attn\": %d, \"is_pp_shared\": %d, \"n_gpu_layers\": %d, \"n_threads\": %u, \"n_threads_batch\": %u, "
-                        "\"pp\": %d, \"tg\": %d, \"pl\": %d, \"n_kv\": %d, \"t_pp\": %f, \"speed_pp\": %f, \"t_tg\": %f, \"speed_tg\": %f, \"t\": %f, \"speed\": %f}\n",
+                        "\"pp\": %d, \"tg\": %d, \"pl\": %d, \"n_kv\": %d, \"t_pp\": %f, \"speed_pp\": %f, \"t_tg\": %f, \"speed_tg\": %f, \"t\": %f, \"speed\": %f, "
+                        "\"pp_compute_profile\": \"%s\", \"tg_compute_profile\": \"%s\"}\n",
                         n_kv_max, params.n_batch, params.n_ubatch, int(params.flash_attn_type), params.is_pp_shared, params.n_gpu_layers, ctx_params.n_threads, ctx_params.n_threads_batch,
-                        pp, tg, pl, n_kv, t_pp, speed_pp, t_tg, speed_tg, t, speed
+                        pp, tg, pl, n_kv, t_pp, speed_pp, t_tg, speed_tg, t, speed, compute_profile_name(pp_options.compute_profile), compute_profile_name(tg_options.compute_profile)
                     );
                 } else {
-                    LOG("|%6d | %6d | %4d | %6d | %8.3f | %8.2f | %8.3f | %8.2f | %8.3f | %8.2f |\n", pp, tg, pl, n_kv, t_pp, speed_pp, t_tg, speed_tg, t, speed);
+                    LOG("|%6d | %6d | %4d | %6d | %8.3f | %8.2f | %8.3f | %8.2f | %8.3f | %8.2f | %10s | %10s |\n", pp, tg, pl, n_kv, t_pp, speed_pp, t_tg, speed_tg, t, speed, compute_profile_name(pp_options.compute_profile), compute_profile_name(tg_options.compute_profile));
                 }
             }
         }

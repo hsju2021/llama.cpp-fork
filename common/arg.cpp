@@ -338,6 +338,20 @@ static bool parse_bool_value(const std::string & value) {
     }
 }
 
+static llama_compute_profile parse_compute_profile(const std::string & value) {
+    if (value == "auto") {
+        return LLAMA_COMPUTE_PROFILE_AUTO;
+    }
+    if (value == "generation") {
+        return LLAMA_COMPUTE_PROFILE_GENERATION;
+    }
+    if (value == "batch") {
+        return LLAMA_COMPUTE_PROFILE_BATCH;
+    }
+
+    throw std::invalid_argument("expected one of: auto, generation, batch");
+}
+
 [[noreturn]] static void arg_removed(const std::string & msg) {
     throw std::invalid_argument("the argument has been removed. " + msg);
 }
@@ -3133,6 +3147,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.is_tg_separate = true;
         }
     ).set_examples({LLAMA_EXAMPLE_BENCH, LLAMA_EXAMPLE_PARALLEL}));
+    add_opt(common_arg(
+        {"--pp-compute-profile"}, "{auto,generation,batch}",
+        "compute profile used for measured prompt processing (default: auto)",
+        [](common_params & params, const std::string & value) {
+            params.batched_bench_pp_compute_profile = parse_compute_profile(value);
+        }
+    ).set_examples({LLAMA_EXAMPLE_BENCH}));
+    add_opt(common_arg(
+        {"--tg-compute-profile"}, "{auto,generation,batch}",
+        "compute profile used for measured text generation (default: auto)",
+        [](common_params & params, const std::string & value) {
+            params.batched_bench_tg_compute_profile = parse_compute_profile(value);
+        }
+    ).set_examples({LLAMA_EXAMPLE_BENCH}));
     add_opt(common_arg(
         {"-npp"}, "n0,n1,...",
         "number of prompt tokens",

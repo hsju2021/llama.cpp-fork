@@ -151,6 +151,52 @@ static void test(void) {
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
     assert(params.load_mode == LLAMA_LOAD_MODE_DIRECT_IO);
 
+    printf("test-arg-parser: test batched-bench compute profiles\n\n");
+
+    {
+        common_params bench_params;
+        argv = {"binary_name", "-m", "model.gguf"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), bench_params, LLAMA_EXAMPLE_BENCH));
+        assert(bench_params.batched_bench_pp_compute_profile == LLAMA_COMPUTE_PROFILE_AUTO);
+        assert(bench_params.batched_bench_tg_compute_profile == LLAMA_COMPUTE_PROFILE_AUTO);
+    }
+
+    {
+        common_params bench_params;
+        argv = {"binary_name", "-m", "model.gguf", "--pp-compute-profile", "batch", "--tg-compute-profile", "generation"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), bench_params, LLAMA_EXAMPLE_BENCH));
+        assert(bench_params.batched_bench_pp_compute_profile == LLAMA_COMPUTE_PROFILE_BATCH);
+        assert(bench_params.batched_bench_tg_compute_profile == LLAMA_COMPUTE_PROFILE_GENERATION);
+    }
+
+    {
+        common_params bench_params;
+        argv = {"binary_name", "-m", "model.gguf", "--pp-compute-profile", "generation", "--tg-compute-profile", "batch"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), bench_params, LLAMA_EXAMPLE_BENCH));
+        assert(bench_params.batched_bench_pp_compute_profile == LLAMA_COMPUTE_PROFILE_GENERATION);
+        assert(bench_params.batched_bench_tg_compute_profile == LLAMA_COMPUTE_PROFILE_BATCH);
+    }
+
+    {
+        common_params bench_params;
+        argv = {"binary_name", "-m", "model.gguf", "--pp-compute-profile", "auto", "--tg-compute-profile", "auto"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), bench_params, LLAMA_EXAMPLE_BENCH));
+        assert(bench_params.batched_bench_pp_compute_profile == LLAMA_COMPUTE_PROFILE_AUTO);
+        assert(bench_params.batched_bench_tg_compute_profile == LLAMA_COMPUTE_PROFILE_AUTO);
+    }
+
+    {
+        common_params bench_params;
+        argv = {"binary_name", "-m", "model.gguf", "--pp-compute-profile", "decode"};
+        assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), bench_params, LLAMA_EXAMPLE_BENCH));
+    }
+
+    {
+        common_params bench_params;
+        argv = {"binary_name", "-m", "model.gguf", "--tg-compute-profile", "prefill"};
+        assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), bench_params, LLAMA_EXAMPLE_BENCH));
+    }
+
     // multi-value args (CSV)
     argv = {"binary_name", "--lora", "file1.gguf,\"file2,2.gguf\",\"file3\"\"3\"\".gguf\",file4\".gguf"};
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));

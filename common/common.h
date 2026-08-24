@@ -687,6 +687,9 @@ struct common_params {
     bool is_pp_shared   = false;
     bool is_tg_separate = false;
 
+    llama_compute_profile batched_bench_pp_compute_profile = LLAMA_COMPUTE_PROFILE_AUTO;
+    llama_compute_profile batched_bench_tg_compute_profile = LLAMA_COMPUTE_PROFILE_AUTO;
+
     std::vector<int32_t> n_pp;
     std::vector<int32_t> n_tg;
     std::vector<int32_t> n_pl;
