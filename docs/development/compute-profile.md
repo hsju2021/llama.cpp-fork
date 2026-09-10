@@ -88,3 +88,27 @@ Libllama is responsible for:
 - Preserving the normal decode return values and memory-state behavior.
 
 Libllama does not reinterpret an explicit profile from batch contents, regroup requests to match a profile, or implement application-level scheduling policy.
+
+## Server experiment modes
+
+`llama-server` can connect semantic prompt and generation work to compute profiles with `--server-compute-profile-mode MODE`:
+
+| Mode | Decode call behavior |
+| --- | --- |
+| `legacy` | Calls `llama_decode()`. This is the default and preserves existing behavior. |
+| `auto` | Calls `llama_decode_with_options()` with `LLAMA_COMPUTE_PROFILE_AUTO`. |
+| `phase` | Requests `BATCH` for prompt-only work, `GENERATION` for generation-only work, and `AUTO` for mixed or unsupported work. |
+
+The server records token origin when it adds tokens to its shared batch. It classifies each submitted `batch_view`, including split and retry ranges, from those recorded origins. A final prompt token remains prompt work even though its logits produce the first sampled token. Batching generated tokens from multiple slots remains generation work.
+
+Use `--server-compute-profile-trace` to log the run, task and slot IDs, decode call and retry IDs, submitted range, token counts, phase, requested profile, return value, and monotonic timestamps in microseconds. Tracing synchronizes successful decode calls so that the logged completion timestamp covers computation completion; use it only for diagnostics. Add `--verbose` to include libllama physical-ubatch profile selection and CPU planned/actual team-size debug logs.
+
+The initial server connection is limited to the target decoder batch assembled in `server_context`. Internal speculative, multimodal, encoder, and maintenance decode paths retain their existing `AUTO` behavior.
+
+## Optional sched_ext phase markers
+
+On Linux, `-DLLAMA_SCX_PHASE_TRACE=ON` adds experimental observation markers for the sibling llama-scheduler project. The option defaults to OFF and requires the bundled CPU backend without GPU or BLAS backends. Enable a run with `--scx-phase-run-id UINT64` and explicit `-ngl 0`. Only single-context decoder-only text generation is supported; speculative, multimodal, and embedding modes are rejected.
+
+`llama_scx_decode_begin_v1` and `llama_scx_decode_end_v1` expose the existing call/retry identity, token-origin counts, semantic phase, and requested profile. `ggml_scx_worker_begin_v1` and `ggml_scx_worker_end_v1` mark actual CPU graph work in both OpenMP and native threadpool builds. Worker end occurs before the final graph barrier, and decode end synchronizes pending work. Tracing is diagnostic and changes timing.
+
+These are optional uprobe symbols, not additions to the public libllama API. The fork does not depend on libbpf or update BPF maps itself. In shared builds, use the marker-bearing `libllama-server-impl.so` and `libggml-cpu.so` ELF paths. The matching 80-byte v1 wire layout is in `tools/server/server-scx.h`; the sibling repository documents the loader, bounded maps, manual kernel checkpoint, and validation in `docs/LLAMA_PHASE.md`.

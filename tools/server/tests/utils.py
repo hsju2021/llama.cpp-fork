@@ -66,6 +66,7 @@ class ServerProcess:
     model_file: str | None = None
     model_draft: str | None = None
     n_threads: int | None = None
+    n_threads_batch: int | None = None
     n_gpu_layer: int | None = None
     n_batch: int | None = None
     n_ubatch: int | None = None
@@ -118,6 +119,8 @@ class ServerProcess:
     mcp_servers_config: str | None = None
     mcp_servers_json: str | None = None
     cors_origins: str | None = None
+    server_compute_profile_mode: str | None = None
+    server_compute_profile_trace: bool = False
 
     # session variables
     process: subprocess.Popen | None = None
@@ -182,6 +185,8 @@ class ServerProcess:
             server_args.extend(["--ubatch-size", self.n_ubatch])
         if self.n_threads:
             server_args.extend(["--threads", self.n_threads])
+        if self.n_threads_batch:
+            server_args.extend(["--threads-batch", self.n_threads_batch])
         if self.n_gpu_layer:
             server_args.extend(["--n-gpu-layers", self.n_gpu_layer])
         if self.server_continuous_batching:
@@ -224,6 +229,10 @@ class ServerProcess:
             server_args.extend(["--grp-attn-w", self.n_ga_w])
         if self.debug:
             server_args.append("--verbose")
+        if self.server_compute_profile_mode:
+            server_args.extend(["--server-compute-profile-mode", self.server_compute_profile_mode])
+        if self.server_compute_profile_trace:
+            server_args.append("--server-compute-profile-trace")
         if self.lora_files:
             for lora_file in self.lora_files:
                 server_args.extend(["--lora", lora_file])

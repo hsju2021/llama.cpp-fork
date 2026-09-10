@@ -32,6 +32,14 @@ else()
 endif()
 
 option(LLAMA_USE_SYSTEM_GGML "Use system libggml" OFF)
+option(LLAMA_SCX_PHASE_TRACE "llama: experimental Linux sched_ext phase markers" OFF)
+
+if (LLAMA_SCX_PHASE_TRACE)
+    if (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR LLAMA_USE_SYSTEM_GGML)
+        message(FATAL_ERROR "LLAMA_SCX_PHASE_TRACE requires Linux and bundled ggml")
+    endif()
+    add_compile_definitions(LLAMA_SCX_PHASE_TRACE)
+endif()
 
 option(LLAMA_WASM_MEM64 "llama: use 64-bit memory in WASM builds" ON)
 
@@ -201,6 +209,14 @@ endif()
 #
 # build the library
 #
+
+if (LLAMA_SCX_PHASE_TRACE)
+    foreach(backend BLAS CUDA HIP MUSA VULKAN METAL SYCL RPC CANN OPENCL OPENVINO ET HEXAGON ZENDNN ZDNN WEBGPU VIRTGPU)
+        if (GGML_${backend})
+            message(FATAL_ERROR "LLAMA_SCX_PHASE_TRACE requires only the CPU backend; disable GGML_${backend}")
+        endif()
+    endforeach()
+endif()
 
 add_subdirectory(src)
 

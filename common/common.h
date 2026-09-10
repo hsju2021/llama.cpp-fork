@@ -445,6 +445,12 @@ struct lr_opt {
 
 struct ggml_opt_optimizer_params common_opt_lr_pars(void * userdata);
 
+enum common_server_compute_profile_mode {
+    COMMON_SERVER_COMPUTE_PROFILE_MODE_LEGACY,
+    COMMON_SERVER_COMPUTE_PROFILE_MODE_AUTO,
+    COMMON_SERVER_COMPUTE_PROFILE_MODE_PHASE,
+};
+
 struct common_params {
     int32_t n_predict             =    -1; // max. number of new tokens to predict, -1 == no limit
     int32_t n_ctx                 =     0; // context size, 0 == context the model was trained with
@@ -618,6 +624,9 @@ struct common_params {
     int32_t n_cache_reuse       = 0;     // min chunk size to reuse from the cache via KV shifting
     bool    cache_prompt        = true;  // whether to enable prompt caching
     bool    cache_idle_slots    = true;  // save and clear idle slots upon starting a new task
+    common_server_compute_profile_mode server_compute_profile_mode = COMMON_SERVER_COMPUTE_PROFILE_MODE_LEGACY;
+    bool    server_compute_profile_trace = false;
+    uint64_t scx_phase_run_id = 0;
     int32_t n_ctx_checkpoints   = 32;    // max number of context checkpoints per slot
     int32_t checkpoint_min_step = 8192;  // minimum spacing between context checkpoints
     int32_t cache_ram_mib       = 8192;  // -1 = no limit, 0 - disable, 1 = 1 MiB, etc.
