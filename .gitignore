@@ -153,3 +153,15 @@ a.out.*
 
 AGENTS.local.md
 .pi/SYSTEM.md
+
+# Local benchmark artifacts
+/benchmark-results/
+/benchmark-models/
+
+# Python tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Preserve logs for the archived experiment
+!/results/compute-profile-20260905T044005Z/logs/*.log
