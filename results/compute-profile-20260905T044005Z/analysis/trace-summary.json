@@ -1,0 +1,326 @@
+{
+  "summary": {
+    "functional-auto-t2-tb6.log": {
+      "calls": 283,
+      "phase_counts": {
+        "PREFILL": 7,
+        "DECODE": 271,
+        "MIXED": 5,
+        "UNKNOWN": 0
+      },
+      "phase_ratios": {
+        "PREFILL": 0.024734982332155476,
+        "DECODE": 0.9575971731448764,
+        "MIXED": 0.0176678445229682,
+        "UNKNOWN": 0.0
+      },
+      "retry_calls": 0,
+      "nonzero_returns": 0,
+      "token_count_errors": [],
+      "profile_mapping_errors": [],
+      "resource_mapping_errors": []
+    },
+    "functional-auto-t6-tb6.log": {
+      "calls": 64,
+      "phase_counts": {
+        "PREFILL": 1,
+        "DECODE": 63,
+        "MIXED": 0,
+        "UNKNOWN": 0
+      },
+      "phase_ratios": {
+        "PREFILL": 0.015625,
+        "DECODE": 0.984375,
+        "MIXED": 0.0,
+        "UNKNOWN": 0.0
+      },
+      "retry_calls": 0,
+      "nonzero_returns": 0,
+      "token_count_errors": [],
+      "profile_mapping_errors": [],
+      "resource_mapping_errors": []
+    },
+    "functional-legacy-t2-tb6.log": {
+      "calls": 283,
+      "phase_counts": {
+        "PREFILL": 7,
+        "DECODE": 271,
+        "MIXED": 5,
+        "UNKNOWN": 0
+      },
+      "phase_ratios": {
+        "PREFILL": 0.024734982332155476,
+        "DECODE": 0.9575971731448764,
+        "MIXED": 0.0176678445229682,
+        "UNKNOWN": 0.0
+      },
+      "retry_calls": 0,
+      "nonzero_returns": 0,
+      "token_count_errors": [],
+      "profile_mapping_errors": [],
+      "resource_mapping_errors": []
+    },
+    "functional-legacy-t6-tb6.log": {
+      "calls": 64,
+      "phase_counts": {
+        "PREFILL": 1,
+        "DECODE": 63,
+        "MIXED": 0,
+        "UNKNOWN": 0
+      },
+      "phase_ratios": {
+        "PREFILL": 0.015625,
+        "DECODE": 0.984375,
+        "MIXED": 0.0,
+        "UNKNOWN": 0.0
+      },
+      "retry_calls": 0,
+      "nonzero_returns": 0,
+      "token_count_errors": [],
+      "profile_mapping_errors": [],
+      "resource_mapping_errors": []
+    },
+    "functional-phase-t2-tb6.log": {
+      "calls": 283,
+      "phase_counts": {
+        "PREFILL": 7,
+        "DECODE": 271,
+        "MIXED": 5,
+        "UNKNOWN": 0
+      },
+      "phase_ratios": {
+        "PREFILL": 0.024734982332155476,
+        "DECODE": 0.9575971731448764,
+        "MIXED": 0.0176678445229682,
+        "UNKNOWN": 0.0
+      },
+      "retry_calls": 0,
+      "nonzero_returns": 0,
+      "token_count_errors": [],
+      "profile_mapping_errors": [],
+      "resource_mapping_errors": []
+    },
+    "functional-phase-t6-tb6.log": {
+      "calls": 64,
+      "phase_counts": {
+        "PREFILL": 1,
+        "DECODE": 63,
+        "MIXED": 0,
+        "UNKNOWN": 0
+      },
+      "phase_ratios": {
+        "PREFILL": 0.015625,
+        "DECODE": 0.984375,
+        "MIXED": 0.0,
+        "UNKNOWN": 0.0
+      },
+      "retry_calls": 0,
+      "nonzero_returns": 0,
+      "token_count_errors": [],
+      "profile_mapping_errors": [],
+      "resource_mapping_errors": []
+    }
+  },
+  "representative_evidence": {
+    "single_token_prefill_phase": {
+      "line_start": 2932,
+      "run": 3321225491,
+      "call": 66,
+      "retry": 0,
+      "off": 0,
+      "n_tokens": 1,
+      "n_prefill": 1,
+      "n_decode": 0,
+      "n_unknown": 0,
+      "phase": "PREFILL",
+      "mode": "phase",
+      "requested_profile": "BATCH",
+      "slots": "3",
+      "tasks": "65",
+      "t_start_us": 3328072033,
+      "ubatches": [
+        {
+          "line_profile": 2933,
+          "requested_profile": "BATCH",
+          "resolved_profile": "BATCH",
+          "n_tokens": 1,
+          "selected_threads": 6,
+          "threadpool_name": "batch",
+          "line_team": 2934,
+          "planned_threads": 6,
+          "actual_team_size": 6,
+          "pool_threads": 6,
+          "disposable_threadpool": "yes"
+        }
+      ],
+      "line_end": 2935,
+      "ret": 0,
+      "return_elapsed_us": 28306,
+      "complete_elapsed_us": 28307
+    },
+    "multi_request_decode_phase": {
+      "line_start": 3292,
+      "run": 3321225491,
+      "call": 75,
+      "retry": 0,
+      "off": 0,
+      "n_tokens": 4,
+      "n_prefill": 0,
+      "n_decode": 4,
+      "n_unknown": 0,
+      "phase": "DECODE",
+      "mode": "phase",
+      "requested_profile": "GENERATION",
+      "slots": "0,1,2,3",
+      "tasks": "75,76,77,78",
+      "t_start_us": 3330884676,
+      "ubatches": [
+        {
+          "line_profile": 3296,
+          "requested_profile": "GENERATION",
+          "resolved_profile": "GENERATION",
+          "n_tokens": 4,
+          "selected_threads": 2,
+          "threadpool_name": "normal",
+          "line_team": 3297,
+          "planned_threads": 2,
+          "actual_team_size": 2,
+          "pool_threads": 2,
+          "disposable_threadpool": "yes"
+        }
+      ],
+      "line_end": 3298,
+      "ret": 0,
+      "return_elapsed_us": 92801,
+      "complete_elapsed_us": 92802
+    },
+    "multi_request_decode_auto": {
+      "line_start": 3292,
+      "run": 3288791365,
+      "call": 75,
+      "retry": 0,
+      "off": 0,
+      "n_tokens": 4,
+      "n_prefill": 0,
+      "n_decode": 4,
+      "n_unknown": 0,
+      "phase": "DECODE",
+      "mode": "auto",
+      "requested_profile": "AUTO",
+      "slots": "0,1,2,3",
+      "tasks": "75,76,77,78",
+      "t_start_us": 3298802370,
+      "ubatches": [
+        {
+          "line_profile": 3296,
+          "requested_profile": "AUTO",
+          "resolved_profile": "BATCH",
+          "n_tokens": 4,
+          "selected_threads": 6,
+          "threadpool_name": "batch",
+          "line_team": 3297,
+          "planned_threads": 6,
+          "actual_team_size": 6,
+          "pool_threads": 6,
+          "disposable_threadpool": "yes"
+        }
+      ],
+      "line_end": 3298,
+      "ret": 0,
+      "return_elapsed_us": 44086,
+      "complete_elapsed_us": 44087
+    },
+    "mixed_phase": {
+      "line_start": 6269,
+      "run": 3321225491,
+      "call": 147,
+      "retry": 0,
+      "off": 0,
+      "n_tokens": 512,
+      "n_prefill": 511,
+      "n_decode": 1,
+      "n_unknown": 0,
+      "phase": "MIXED",
+      "mode": "phase",
+      "requested_profile": "AUTO",
+      "slots": "0,1",
+      "tasks": "143,153",
+      "t_start_us": 3337545559,
+      "ubatches": [
+        {
+          "line_profile": 6271,
+          "requested_profile": "AUTO",
+          "resolved_profile": "BATCH",
+          "n_tokens": 2,
+          "selected_threads": 6,
+          "threadpool_name": "batch",
+          "line_team": 6272,
+          "planned_threads": 6,
+          "actual_team_size": 6,
+          "pool_threads": 6,
+          "disposable_threadpool": "yes"
+        },
+        {
+          "line_profile": 6273,
+          "requested_profile": "AUTO",
+          "resolved_profile": "BATCH",
+          "n_tokens": 256,
+          "selected_threads": 6,
+          "threadpool_name": "batch",
+          "line_team": 6274,
+          "planned_threads": 6,
+          "actual_team_size": 6,
+          "pool_threads": 6,
+          "disposable_threadpool": "yes"
+        },
+        {
+          "line_profile": 6275,
+          "requested_profile": "AUTO",
+          "resolved_profile": "BATCH",
+          "n_tokens": 254,
+          "selected_threads": 6,
+          "threadpool_name": "batch",
+          "line_team": 6276,
+          "planned_threads": 6,
+          "actual_team_size": 6,
+          "pool_threads": 6,
+          "disposable_threadpool": "yes"
+        }
+      ],
+      "line_end": 6277,
+      "ret": 0,
+      "return_elapsed_us": 2735547,
+      "complete_elapsed_us": 2735549
+    }
+  },
+  "lifecycle_evidence": [
+    {
+      "line": 8918,
+      "text": "0.33.091.692 I slot   operator(): id  0 | task 273 | new prompt, n_ctx_slot = 3072, n_keep = 0, task.n_tokens = 128"
+    },
+    {
+      "line": 9121,
+      "text": "0.33.981.363 W srv          stop: cancel task, id_task = 273"
+    },
+    {
+      "line": 9131,
+      "text": "0.34.015.574 I slot      release: id  0 | task 273 | stop processing: n_tokens = 137, truncated = 0"
+    },
+    {
+      "line": 9132,
+      "text": "0.34.015.575 D slot        reset: id  0 | task 273 | "
+    },
+    {
+      "line": 9168,
+      "text": "0.34.447.983 I slot   operator(): id  0 | task 285 | new prompt, n_ctx_slot = 3072, n_keep = 0, task.n_tokens = 128"
+    },
+    {
+      "line": 9340,
+      "text": "0.35.293.784 I slot      release: id  0 | task 285 | stop processing: n_tokens = 135, truncated = 0"
+    },
+    {
+      "line": 9341,
+      "text": "0.35.293.784 D slot        reset: id  0 | task 285 | "
+    }
+  ]
+}

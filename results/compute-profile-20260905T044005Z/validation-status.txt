@@ -1,0 +1,20 @@
+PASS: Release CPU-only llama-server build
+PASS: test-compute-profile CTest
+PASS: new server argument-parser cases reached and passed
+BLOCKED: complete test-arg-parser run at pre-existing external URL GET test because network access is unavailable
+PASS: Python syntax checks for workload.py, analyze_trace.py, and test_compute_profile.py
+UNVERIFIED: pytest execution of test_compute_profile.py because pytest is not installed
+PASS: real localhost HTTP completion and streaming coverage for legacy, auto, and phase modes
+PASS: A/B S1 token IDs and stop reason at t=2,tb=6 and t=6,tb=6
+PASS: S1 PREFILL-to-DECODE transition
+PASS: S2 one-token PREFILL -> BATCH -> 6-thread actual OpenMP team
+PASS: S3 four-request DECODE -> GENERATION -> 2-thread actual OpenMP team
+PASS: S3 AUTO comparison -> BATCH -> 6-thread actual OpenMP team
+PASS: S4 MIXED -> AUTO fallback -> BATCH -> 6-thread actual OpenMP teams
+PASS: S5 cancel, reset, slot reuse, and clean PREFILL metadata
+PASS: all phase token-count invariants
+PASS: all requested/resolved/planned/actual resource mappings
+NOT OBSERVED: retry after decode failure; zero retries and zero decode failures occurred
+PASS: 45/45 performance records, five repetitions per mode/scenario
+PASS: 6735 single-token SSE intervals; zero grouped-token events
+PASS: zero performance failures and zero cancellations

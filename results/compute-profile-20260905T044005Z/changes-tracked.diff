@@ -1,0 +1,490 @@
+diff --git a/common/arg.cpp b/common/arg.cpp
+index 064f3513e..5f888ff17 100644
+--- a/common/arg.cpp
++++ b/common/arg.cpp
+@@ -352,6 +352,20 @@ static llama_compute_profile parse_compute_profile(const std::string & value) {
+     throw std::invalid_argument("expected one of: auto, generation, batch");
+ }
+ 
++static common_server_compute_profile_mode parse_server_compute_profile_mode(const std::string & value) {
++    if (value == "legacy") {
++        return COMMON_SERVER_COMPUTE_PROFILE_MODE_LEGACY;
++    }
++    if (value == "auto") {
++        return COMMON_SERVER_COMPUTE_PROFILE_MODE_AUTO;
++    }
++    if (value == "phase") {
++        return COMMON_SERVER_COMPUTE_PROFILE_MODE_PHASE;
++    }
++
++    throw std::invalid_argument("expected one of: legacy, auto, phase");
++}
++
+ [[noreturn]] static void arg_removed(const std::string & msg) {
+     throw std::invalid_argument("the argument has been removed. " + msg);
+ }
+@@ -3449,6 +3463,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+             params.n_threads_http = value;
+         }
+     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_THREADS_HTTP"));
++    add_opt(common_arg(
++        {"--server-compute-profile-mode"}, "MODE",
++        "select server decode API/profile mode: legacy, auto, or phase (default: legacy)",
++        [](common_params & params, const std::string & value) {
++            params.server_compute_profile_mode = parse_server_compute_profile_mode(value);
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SERVER_COMPUTE_PROFILE_MODE"));
++    add_opt(common_arg(
++        {"--server-compute-profile-trace"},
++        "log semantic batch phases and synchronize traced decode calls (default: disabled)",
++        [](common_params & params) {
++            params.server_compute_profile_trace = true;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SERVER_COMPUTE_PROFILE_TRACE"));
+     add_opt(common_arg(
+         {"--cache-prompt"},
+         {"--no-cache-prompt"},
+diff --git a/common/common.h b/common/common.h
+index 46b648431..5f96be580 100644
+--- a/common/common.h
++++ b/common/common.h
+@@ -445,6 +445,12 @@ struct lr_opt {
+ 
+ struct ggml_opt_optimizer_params common_opt_lr_pars(void * userdata);
+ 
++enum common_server_compute_profile_mode {
++    COMMON_SERVER_COMPUTE_PROFILE_MODE_LEGACY,
++    COMMON_SERVER_COMPUTE_PROFILE_MODE_AUTO,
++    COMMON_SERVER_COMPUTE_PROFILE_MODE_PHASE,
++};
++
+ struct common_params {
+     int32_t n_predict             =    -1; // max. number of new tokens to predict, -1 == no limit
+     int32_t n_ctx                 =     0; // context size, 0 == context the model was trained with
+@@ -618,6 +624,8 @@ struct common_params {
+     int32_t n_cache_reuse       = 0;     // min chunk size to reuse from the cache via KV shifting
+     bool    cache_prompt        = true;  // whether to enable prompt caching
+     bool    cache_idle_slots    = true;  // save and clear idle slots upon starting a new task
++    common_server_compute_profile_mode server_compute_profile_mode = COMMON_SERVER_COMPUTE_PROFILE_MODE_LEGACY;
++    bool    server_compute_profile_trace = false;
+     int32_t n_ctx_checkpoints   = 32;    // max number of context checkpoints per slot
+     int32_t checkpoint_min_step = 8192;  // minimum spacing between context checkpoints
+     int32_t cache_ram_mib       = 8192;  // -1 = no limit, 0 - disable, 1 = 1 MiB, etc.
+diff --git a/docs/development/compute-profile.md b/docs/development/compute-profile.md
+index 23653e71d..e61667c36 100644
+--- a/docs/development/compute-profile.md
++++ b/docs/development/compute-profile.md
+@@ -88,3 +88,19 @@ Libllama is responsible for:
+ - Preserving the normal decode return values and memory-state behavior.
+ 
+ Libllama does not reinterpret an explicit profile from batch contents, regroup requests to match a profile, or implement application-level scheduling policy.
++
++## Server experiment modes
++
++`llama-server` can connect semantic prompt and generation work to compute profiles with `--server-compute-profile-mode MODE`:
++
++| Mode | Decode call behavior |
++| --- | --- |
++| `legacy` | Calls `llama_decode()`. This is the default and preserves existing behavior. |
++| `auto` | Calls `llama_decode_with_options()` with `LLAMA_COMPUTE_PROFILE_AUTO`. |
++| `phase` | Requests `BATCH` for prompt-only work, `GENERATION` for generation-only work, and `AUTO` for mixed or unsupported work. |
++
++The server records token origin when it adds tokens to its shared batch. It classifies each submitted `batch_view`, including split and retry ranges, from those recorded origins. A final prompt token remains prompt work even though its logits produce the first sampled token. Batching generated tokens from multiple slots remains generation work.
++
++Use `--server-compute-profile-trace` to log the run, task and slot IDs, decode call and retry IDs, submitted range, token counts, phase, requested profile, return value, and monotonic timestamps in microseconds. Tracing synchronizes successful decode calls so that the logged completion timestamp covers computation completion; use it only for diagnostics. Add `--verbose` to include libllama physical-ubatch profile selection and CPU planned/actual team-size debug logs.
++
++The initial server connection is limited to the target decoder batch assembled in `server_context`. Internal speculative, multimodal, encoder, and maintenance decode paths retain their existing `AUTO` behavior.
+diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
+index 491316f74..687e0205f 100644
+--- a/ggml/src/ggml-cpu/ggml-cpu.c
++++ b/ggml/src/ggml-cpu/ggml-cpu.c
+@@ -3355,6 +3355,7 @@ enum ggml_status ggml_graph_compute(struct ggml_cgraph * cgraph, struct ggml_cpl
+     GGML_ASSERT(cplan->work_size == 0 || cplan->work_data != NULL);
+ 
+     int n_threads                               = cplan->n_threads;
++    const int n_threads_planned                 = n_threads;
+     struct ggml_threadpool * threadpool = cplan->threadpool;
+ 
+     bool disposable_threadpool = false;
+@@ -3412,6 +3413,9 @@ enum ggml_status ggml_graph_compute(struct ggml_cgraph * cgraph, struct ggml_cpl
+     ggml_graph_compute_thread(&threadpool->workers[0]);
+ #endif
+ 
++    GGML_LOG_DEBUG("%s: planned_threads=%d, actual_team_size=%d, pool_threads=%d, disposable_threadpool=%s\n",
++            __func__, n_threads_planned, n_threads, threadpool->n_threads, disposable_threadpool ? "yes" : "no");
++
+     // don't leave affinity set on the main thread
+     clear_numa_thread_affinity();
+ 
+diff --git a/tests/test-arg-parser.cpp b/tests/test-arg-parser.cpp
+index 5aa0e269c..c6767fe43 100644
+--- a/tests/test-arg-parser.cpp
++++ b/tests/test-arg-parser.cpp
+@@ -7,6 +7,7 @@
+ #include <vector>
+ #include <sstream>
+ #include <unordered_set>
++#include <utility>
+ 
+ #undef NDEBUG
+ #include <cassert>
+@@ -197,6 +198,34 @@ static void test(void) {
+         assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), bench_params, LLAMA_EXAMPLE_BENCH));
+     }
+ 
++    printf("test-arg-parser: test server compute profile modes\n\n");
++
++    {
++        common_params server_params;
++        argv = {"binary_name", "-m", "model.gguf"};
++        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), server_params, LLAMA_EXAMPLE_SERVER));
++        assert(server_params.server_compute_profile_mode == COMMON_SERVER_COMPUTE_PROFILE_MODE_LEGACY);
++        assert(!server_params.server_compute_profile_trace);
++    }
++
++    for (const auto & profile_mode : {
++            std::make_pair("legacy", COMMON_SERVER_COMPUTE_PROFILE_MODE_LEGACY),
++            std::make_pair("auto",   COMMON_SERVER_COMPUTE_PROFILE_MODE_AUTO),
++            std::make_pair("phase",  COMMON_SERVER_COMPUTE_PROFILE_MODE_PHASE),
++        }) {
++        common_params server_params;
++        argv = {"binary_name", "-m", "model.gguf", "--server-compute-profile-mode", profile_mode.first, "--server-compute-profile-trace"};
++        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), server_params, LLAMA_EXAMPLE_SERVER));
++        assert(server_params.server_compute_profile_mode == profile_mode.second);
++        assert(server_params.server_compute_profile_trace);
++    }
++
++    {
++        common_params server_params;
++        argv = {"binary_name", "-m", "model.gguf", "--server-compute-profile-mode", "invalid"};
++        assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), server_params, LLAMA_EXAMPLE_SERVER));
++    }
++
+     // multi-value args (CSV)
+     argv = {"binary_name", "--lora", "file1.gguf,\"file2,2.gguf\",\"file3\"\"3\"\".gguf\",file4\".gguf"};
+     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index 4655b518e..7df1f3d98 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -23,6 +23,8 @@
+ #include <exception>
+ #include <memory>
+ #include <filesystem>
++#include <set>
++#include <sstream>
+ #include <utility>
+ #include <fstream>
+ 
+@@ -64,6 +66,44 @@ enum slot_state {
+     SLOT_STATE_GENERATING,
+ };
+ 
++enum server_batch_phase {
++    SERVER_BATCH_PHASE_UNKNOWN,
++    SERVER_BATCH_PHASE_PREFILL,
++    SERVER_BATCH_PHASE_DECODE,
++    SERVER_BATCH_PHASE_MIXED,
++};
++
++static const char * server_batch_phase_name(server_batch_phase phase) {
++    switch (phase) {
++        case SERVER_BATCH_PHASE_UNKNOWN: return "UNKNOWN";
++        case SERVER_BATCH_PHASE_PREFILL: return "PREFILL";
++        case SERVER_BATCH_PHASE_DECODE:  return "DECODE";
++        case SERVER_BATCH_PHASE_MIXED:   return "MIXED";
++    }
++
++    GGML_ABORT("invalid server batch phase");
++}
++
++static const char * server_compute_profile_name(llama_compute_profile profile) {
++    switch (profile) {
++        case LLAMA_COMPUTE_PROFILE_AUTO:       return "AUTO";
++        case LLAMA_COMPUTE_PROFILE_GENERATION: return "GENERATION";
++        case LLAMA_COMPUTE_PROFILE_BATCH:      return "BATCH";
++    }
++
++    GGML_ABORT("invalid compute profile");
++}
++
++static const char * server_compute_profile_mode_name(common_server_compute_profile_mode mode) {
++    switch (mode) {
++        case COMMON_SERVER_COMPUTE_PROFILE_MODE_LEGACY: return "legacy";
++        case COMMON_SERVER_COMPUTE_PROFILE_MODE_AUTO:   return "auto";
++        case COMMON_SERVER_COMPUTE_PROFILE_MODE_PHASE:  return "phase";
++    }
++
++    GGML_ABORT("invalid server compute profile mode");
++}
++
+ struct server_slot; // forward declaration
+ 
+ struct server_batch {
+@@ -72,9 +112,11 @@ struct server_batch {
+ 
+     struct token {
+         int32_t id_slot;
++        int id_task;
+         llama_token token;
+         llama_pos pos;
+         bool output;
++        server_batch_phase phase;
+     };
+     std::vector<token> tokens;
+     int32_t n_tokens_alloc = 0;
+@@ -110,22 +152,22 @@ struct server_batch {
+         tokens.reserve(n_tokens_alloc);
+     }
+ 
+-    bool add(int32_t id_slot, llama_token token, llama_pos pos, bool output) {
++    bool add(int32_t id_slot, int id_task, llama_token token, llama_pos pos, bool output, server_batch_phase phase) {
+         GGML_ASSERT(!has_embd); // cannot mix tokens + embd in same batch
+         GGML_ASSERT(batch.pos != nullptr);
+         if ((int32_t)tokens.size() >= n_tokens_alloc) {
+             return false;
+         }
+-        tokens.push_back({ id_slot, token, pos, output });
++        tokens.push_back({ id_slot, id_task, token, pos, output, phase });
+         return true;
+     }
+ 
+-    bool add(int32_t id_slot, const std::vector<float> & embd_in, llama_pos pos, bool output) {
++    bool add(int32_t id_slot, int id_task, const std::vector<float> & embd_in, llama_pos pos, bool output, server_batch_phase phase) {
+         GGML_ASSERT(batch.pos != nullptr);
+         if ((int32_t)tokens.size() >= n_tokens_alloc) {
+             return false;
+         }
+-        tokens.push_back({ id_slot, LLAMA_TOKEN_NULL, pos, output });
++        tokens.push_back({ id_slot, id_task, LLAMA_TOKEN_NULL, pos, output, phase });
+         has_embd = true;
+         embd.insert(embd.end(), embd_in.begin(), embd_in.end());
+         return true;
+@@ -489,9 +531,9 @@ struct server_slot {
+             i_batch = batch.size();
+ 
+             if (!inp_embd.empty()) {
+-                add_ok &= batch.add(id, inp_embd, prompt.tokens.pos_next(), true);
++                add_ok &= batch.add(id, task->id, inp_embd, prompt.tokens.pos_next(), true, SERVER_BATCH_PHASE_DECODE);
+             } else {
+-                add_ok &= batch.add(id, sampled, prompt.tokens.pos_next(), true);
++                add_ok &= batch.add(id, task->id, sampled, prompt.tokens.pos_next(), true, SERVER_BATCH_PHASE_DECODE);
+             }
+ 
+             SLT_DBG(*this, "slot decode token, id=%d, n_ctx = %d, n_tokens = %d, truncated = %d\n",
+@@ -509,9 +551,9 @@ struct server_slot {
+ 
+             auto pos0 = prompt.tokens.pos_next();
+ 
+-            add_ok &= batch.add(id, sampled, pos0++, true);
++            add_ok &= batch.add(id, task->id, sampled, pos0++, true, SERVER_BATCH_PHASE_DECODE);
+             for (auto token : spec_draft) {
+-                add_ok &= batch.add(this->id, token, pos0++, true);
++                add_ok &= batch.add(this->id, task->id, token, pos0++, true, SERVER_BATCH_PHASE_DECODE);
+             }
+         }
+ 
+@@ -910,6 +952,7 @@ public:
+ 
+     server_context_impl() {
+         mtmd_helper_log_set(common_log_default_callback, nullptr);
++        compute_profile_run_id = ggml_time_us();
+     }
+ 
+     ~server_context_impl() {
+@@ -957,6 +1000,8 @@ private:
+     int trace = 0;
+     int slots_debug = 0;
+     int n_empty_consecutive = 0;
++    int64_t compute_profile_run_id = 0;
++    uint64_t compute_profile_call_id = 0;
+ 
+     std::unique_ptr<server_prompt_cache> prompt_cache;
+ 
+@@ -2849,6 +2894,7 @@ private:
+         llama_batch batch_view;
+         int32_t off_next = 0;
+         int32_t n_batch = llama_n_batch(ctx_tgt);
++        int32_t retry = 0;
+         for (int32_t off = 0; off < batch.size(); off = off_next) {
+             const int32_t n_tokens = std::min(n_batch, batch.size() - off);
+             try {
+@@ -2856,7 +2902,7 @@ private:
+                 // TODO @ngxson : maybe handle n_batch == 1 here instead of inside decode()
+ 
+                 batch_view = batch.get_view(off, n_tokens);
+-                bool ok = decode(n_batch, off, batch_view);
++                bool ok = decode(n_batch, off, retry, batch_view);
+ #ifdef DEBUG_TIMINGS
+                 llama_synchronize(ctx_tgt);
+ #endif
+@@ -2867,8 +2913,10 @@ private:
+ 
+                     // on successful decode, restore the original batch size
+                     n_batch = llama_n_batch(ctx_tgt);
++                    retry = 0;
+                 } else {
+                     // try again with the updated n_batch
++                    retry++;
+                     continue;
+                 }
+             } catch (const std::exception & e) {
+@@ -3507,9 +3555,11 @@ private:
+                         // MTP also wants logits at every prompt position so the
+                         // streaming hook can mirror t_h_nextn into ctx_dft.
+                         add_ok &= batch.add(slot.id,
++                            slot.task->id,
+                             cur_tok,
+                             slot.prompt.tokens.pos_next(),
+-                            slot.need_embd());
++                            slot.need_embd(),
++                            SERVER_BATCH_PHASE_PREFILL);
+                         slot.prompt.tokens.push_back(cur_tok);
+ 
+                         slot.n_prompt_tokens_processed++;
+@@ -3612,7 +3662,7 @@ private:
+ 
+     // returns true = success ; false = retry with smaller batch size
+     // throw std::runtime_error on fatal error
+-    bool decode(int32_t & n_batch, int32_t off, llama_batch & batch_view) {
++    bool decode(int32_t & n_batch, int32_t off, int32_t retry, llama_batch & batch_view) {
+         SRV_DBG("n_batch (effective) = %d, off = %d\n", n_batch, off);
+ 
+         if (batch.size() == 0) {
+@@ -3636,7 +3686,94 @@ private:
+             }
+         }
+ 
+-        const int ret = llama_decode(ctx_tgt, batch_view);
++        const auto profile_mode = params_base.server_compute_profile_mode;
++        const bool trace_profile = params_base.server_compute_profile_trace;
++        const bool classify_phase = trace_profile || profile_mode == COMMON_SERVER_COMPUTE_PROFILE_MODE_PHASE;
++
++        int32_t n_prefill = 0;
++        int32_t n_decode  = 0;
++        int32_t n_unknown = classify_phase ? 0 : batch_view.n_tokens;
++        std::set<int> slot_ids;
++        std::set<int> task_ids;
++        if (classify_phase) {
++            for (int32_t i = off; i < off + batch_view.n_tokens; ++i) {
++                const auto & token = batch.tokens[i];
++                if (trace_profile) {
++                    slot_ids.insert(token.id_slot);
++                    task_ids.insert(token.id_task);
++                }
++                switch (token.phase) {
++                    case SERVER_BATCH_PHASE_PREFILL: n_prefill++; break;
++                    case SERVER_BATCH_PHASE_DECODE:  n_decode++;  break;
++                    case SERVER_BATCH_PHASE_UNKNOWN: n_unknown++; break;
++                    case SERVER_BATCH_PHASE_MIXED:   GGML_ABORT("MIXED is not a token source");
++                }
++            }
++        }
++
++        server_batch_phase phase = SERVER_BATCH_PHASE_UNKNOWN;
++        if (n_unknown == 0) {
++            if (n_prefill > 0 && n_decode > 0) {
++                phase = SERVER_BATCH_PHASE_MIXED;
++            } else if (n_prefill > 0) {
++                phase = SERVER_BATCH_PHASE_PREFILL;
++            } else if (n_decode > 0) {
++                phase = SERVER_BATCH_PHASE_DECODE;
++            }
++        }
++
++        llama_compute_profile requested_profile = LLAMA_COMPUTE_PROFILE_AUTO;
++        const bool use_options = profile_mode != COMMON_SERVER_COMPUTE_PROFILE_MODE_LEGACY;
++        if (profile_mode == COMMON_SERVER_COMPUTE_PROFILE_MODE_PHASE) {
++            if (phase == SERVER_BATCH_PHASE_PREFILL) {
++                requested_profile = LLAMA_COMPUTE_PROFILE_BATCH;
++            } else if (phase == SERVER_BATCH_PHASE_DECODE) {
++                requested_profile = LLAMA_COMPUTE_PROFILE_GENERATION;
++            }
++        }
++
++        const uint64_t call_id = ++compute_profile_call_id;
++        const int64_t t_start_us = ggml_time_us();
++
++        auto format_ids = [](const std::set<int> & ids) {
++            std::ostringstream ss;
++            const char * separator = "";
++            for (int id : ids) {
++                ss << separator << id;
++                separator = ",";
++            }
++            return ss.str();
++        };
++
++        if (trace_profile) {
++            const std::string slots_text = format_ids(slot_ids);
++            const std::string tasks_text = format_ids(task_ids);
++            SRV_INF("compute_profile_trace start: run=%" PRId64 " call=%" PRIu64 " retry=%d off=%d n_tokens=%d n_prefill=%d n_decode=%d n_unknown=%d phase=%s mode=%s requested_profile=%s slots=%s tasks=%s t_start_us=%" PRId64 "\n",
++                    compute_profile_run_id, call_id, retry, off, batch_view.n_tokens, n_prefill, n_decode, n_unknown,
++                    server_batch_phase_name(phase), server_compute_profile_mode_name(profile_mode),
++                    use_options ? server_compute_profile_name(requested_profile) : "LEGACY", slots_text.c_str(), tasks_text.c_str(), t_start_us);
++        }
++
++        int ret;
++        if (use_options) {
++            auto options = llama_decode_default_options();
++            options.compute_profile = requested_profile;
++            ret = llama_decode_with_options(ctx_tgt, batch_view, options);
++        } else {
++            ret = llama_decode(ctx_tgt, batch_view);
++        }
++
++        const int64_t t_return_us = ggml_time_us();
++        int64_t t_complete_us = t_return_us;
++        if (trace_profile && ret == 0) {
++            llama_synchronize(ctx_tgt);
++            t_complete_us = ggml_time_us();
++        }
++
++        if (trace_profile) {
++            SRV_INF("compute_profile_trace end: run=%" PRId64 " call=%" PRIu64 " retry=%d ret=%d t_return_us=%" PRId64 " t_complete_us=%" PRId64 " return_elapsed_us=%" PRId64 " complete_elapsed_us=%" PRId64 "\n",
++                    compute_profile_run_id, call_id, retry, ret, t_return_us, t_complete_us, t_return_us - t_start_us, t_complete_us - t_start_us);
++        }
+ 
+         metrics.on_decoded(slots);
+ 
+diff --git a/tools/server/tests/utils.py b/tools/server/tests/utils.py
+index ae56bc70a..b047d90e0 100644
+--- a/tools/server/tests/utils.py
++++ b/tools/server/tests/utils.py
+@@ -66,6 +66,7 @@ class ServerProcess:
+     model_file: str | None = None
+     model_draft: str | None = None
+     n_threads: int | None = None
++    n_threads_batch: int | None = None
+     n_gpu_layer: int | None = None
+     n_batch: int | None = None
+     n_ubatch: int | None = None
+@@ -118,6 +119,8 @@ class ServerProcess:
+     mcp_servers_config: str | None = None
+     mcp_servers_json: str | None = None
+     cors_origins: str | None = None
++    server_compute_profile_mode: str | None = None
++    server_compute_profile_trace: bool = False
+ 
+     # session variables
+     process: subprocess.Popen | None = None
+@@ -182,6 +185,8 @@ class ServerProcess:
+             server_args.extend(["--ubatch-size", self.n_ubatch])
+         if self.n_threads:
+             server_args.extend(["--threads", self.n_threads])
++        if self.n_threads_batch:
++            server_args.extend(["--threads-batch", self.n_threads_batch])
+         if self.n_gpu_layer:
+             server_args.extend(["--n-gpu-layers", self.n_gpu_layer])
+         if self.server_continuous_batching:
+@@ -224,6 +229,10 @@ class ServerProcess:
+             server_args.extend(["--grp-attn-w", self.n_ga_w])
+         if self.debug:
+             server_args.append("--verbose")
++        if self.server_compute_profile_mode:
++            server_args.extend(["--server-compute-profile-mode", self.server_compute_profile_mode])
++        if self.server_compute_profile_trace:
++            server_args.append("--server-compute-profile-trace")
+         if self.lora_files:
+             for lora_file in self.lora_files:
+                 server_args.extend(["--lora", lora_file])

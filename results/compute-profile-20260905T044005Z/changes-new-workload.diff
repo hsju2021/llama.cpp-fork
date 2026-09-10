@@ -1,0 +1,411 @@
+diff --git a/results/compute-profile-20260905T044005Z/workload.py b/results/compute-profile-20260905T044005Z/workload.py
+new file mode 100644
+index 000000000..a09068465
+--- /dev/null
++++ b/results/compute-profile-20260905T044005Z/workload.py
+@@ -0,0 +1,405 @@
++#!/usr/bin/env python3
++
++import argparse
++import concurrent.futures
++import json
++import os
++import random
++import statistics
++import subprocess
++import threading
++import time
++import urllib.error
++import urllib.request
++from pathlib import Path
++
++
++WORKLOAD_SEED = 20260905
++REQUEST_SEED = 424242
++
++
++def post_json(base_url, path, data, timeout=600):
++    body = json.dumps(data).encode("utf-8")
++    request = urllib.request.Request(
++        base_url + path,
++        data=body,
++        headers={"Content-Type": "application/json"},
++        method="POST",
++    )
++    with urllib.request.urlopen(request, timeout=timeout) as response:
++        return json.loads(response.read().decode("utf-8"))
++
++
++def wait_ready(base_url, process, timeout=120):
++    deadline = time.monotonic() + timeout
++    while time.monotonic() < deadline:
++        if process.poll() is not None:
++            raise RuntimeError(f"server exited with code {process.returncode}")
++        try:
++            with urllib.request.urlopen(base_url + "/health", timeout=2) as response:
++                if response.status == 200:
++                    return
++        except (urllib.error.URLError, TimeoutError):
++            pass
++        time.sleep(0.2)
++    raise TimeoutError("server did not become ready")
++
++
++def make_exact_prompts(base_url):
++    text = " fixed benchmark token sequence"
++    plain = post_json(base_url, "/tokenize", {"content": text, "add_special": False})["tokens"]
++    special = post_json(base_url, "/tokenize", {"content": text, "add_special": True})["tokens"]
++
++    prefix = []
++    if len(special) >= len(plain) and special[len(special) - len(plain):] == plain:
++        prefix = special[:len(special) - len(plain)]
++    body = plain or special
++    if not body:
++        raise RuntimeError("tokenizer produced no reusable tokens")
++
++    def exact(length):
++        if len(prefix) > length:
++            raise RuntimeError("special-token prefix exceeds requested length")
++        result = list(prefix)
++        while len(result) < length:
++            result.extend(body[:length - len(result)])
++        if len(result) != length:
++            raise AssertionError("incorrect prompt length")
++        return result
++
++    return {
++        "tokenizer_text": text,
++        "tokens_without_special": plain,
++        "tokens_with_special": special,
++        "special_prefix": prefix,
++        "prompt_128": exact(128),
++        "prompt_513": exact(513),
++        "prompt_2048": exact(2048),
++    }
++
++
++def completion_payload(prompt, n_predict):
++    return {
++        "prompt": prompt,
++        "n_predict": n_predict,
++        "temperature": 0.0,
++        "seed": REQUEST_SEED,
++        "cache_prompt": False,
++        "ignore_eos": True,
++        "return_tokens": True,
++        "stream": True,
++    }
++
++
++def stream_completion(base_url, prompt, n_predict, signal=None, signal_tokens=8, cancel_after=None):
++    payload = completion_payload(prompt, n_predict)
++    request = urllib.request.Request(
++        base_url + "/completion",
++        data=json.dumps(payload).encode("utf-8"),
++        headers={"Content-Type": "application/json"},
++        method="POST",
++    )
++
++    start_ns = time.monotonic_ns()
++    events = []
++    received = 0
++    cancelled = False
++    with urllib.request.urlopen(request, timeout=600) as response:
++        headers_ns = time.monotonic_ns()
++        for raw_line in response:
++            line = raw_line.decode("utf-8").strip()
++            if not line.startswith("data: "):
++                continue
++            data = json.loads(line[6:])
++            now_ns = time.monotonic_ns()
++            tokens = data.get("tokens", [])
++            received += len(tokens)
++            events.append({
++                "t_ns": now_ns,
++                "tokens": tokens,
++                "stop": data.get("stop", False),
++                "stop_type": data.get("stop_type"),
++            })
++            if signal is not None and received >= signal_tokens:
++                signal.set()
++            if cancel_after is not None and received >= cancel_after and not data.get("stop", False):
++                cancelled = True
++                break
++
++    end_ns = time.monotonic_ns()
++    token_events = [event for event in events if event["tokens"]]
++    final_events = [event for event in events if event["stop"]]
++    return {
++        "start_ns": start_ns,
++        "headers_ns": headers_ns,
++        "end_ns": end_ns,
++        "events": events,
++        "tokens": [token for event in token_events for token in event["tokens"]],
++        "ttft_ms": (token_events[0]["t_ns"] - start_ns) / 1e6 if token_events else None,
++        "completion_ms": (end_ns - start_ns) / 1e6,
++        "stop_type": final_events[-1]["stop_type"] if final_events else None,
++        "cancelled_by_client": cancelled,
++    }
++
++
++def run_s1(base_url, prompts):
++    return {"requests": [stream_completion(base_url, prompts["prompt_128"], 64)]}
++
++
++def run_s2(base_url, prompts):
++    return {"requests": [stream_completion(base_url, prompts["prompt_513"], 8)]}
++
++
++def run_s3(base_url, prompts):
++    barrier = threading.Barrier(4)
++
++    def request_one():
++        barrier.wait()
++        return stream_completion(base_url, prompts["prompt_128"], 64)
++
++    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
++        futures = [executor.submit(request_one) for _ in range(4)]
++        return {"requests": [future.result() for future in futures]}
++
++
++def run_s4(base_url, prompts):
++    ready = threading.Event()
++    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
++        future_a = executor.submit(stream_completion, base_url, prompts["prompt_128"], 128, ready, 8)
++        if not ready.wait(timeout=120):
++            raise TimeoutError("request A did not produce enough tokens")
++        request_b = stream_completion(base_url, prompts["prompt_2048"], 8)
++        request_a = future_a.result()
++    return {"requests": [request_a, request_b]}
++
++
++def run_s5(base_url, prompts):
++    cancelled = stream_completion(base_url, prompts["prompt_128"], 128, cancel_after=8)
++    time.sleep(0.5)
++    reused = stream_completion(base_url, prompts["prompt_128"], 8)
++    return {"requests": [cancelled, reused]}
++
++
++SCENARIOS = {
++    "S1": run_s1,
++    "S2": run_s2,
++    "S3": run_s3,
++    "S4": run_s4,
++    "S5": run_s5,
++}
++
++
++def process_cpu_seconds(pid):
++    stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
++    fields = stat[stat.rfind(")") + 2:].split()
++    ticks = int(fields[11]) + int(fields[12])
++    return ticks / os.sysconf("SC_CLK_TCK")
++
++
++def compact_request(request):
++    token_events = [event for event in request["events"] if event["tokens"]]
++    token_intervals_ms = []
++    for previous, current in zip(token_events, token_events[1:]):
++        if len(previous["tokens"]) == 1 and len(current["tokens"]) == 1:
++            token_intervals_ms.append((current["t_ns"] - previous["t_ns"]) / 1e6)
++
++    return {
++        "ttft_ms": request["ttft_ms"],
++        "completion_ms": request["completion_ms"],
++        "n_tokens": len(request["tokens"]),
++        "stop_type": request["stop_type"],
++        "cancelled_by_client": request["cancelled_by_client"],
++        "n_grouped_token_events": sum(len(event["tokens"]) > 1 for event in request["events"]),
++        "token_intervals_ms": token_intervals_ms,
++    }
++
++
++def summarize_performance(records):
++    grouped = {}
++    for record in records:
++        key = (record["mode"], record["scenario"])
++        grouped.setdefault(key, []).append(record)
++
++    summary = []
++    for (mode, scenario), rows in sorted(grouped.items()):
++        requests = [request for row in rows for request in row["requests"]]
++        ttft = [request["ttft_ms"] for request in requests if request["ttft_ms"] is not None]
++        completion = [request["completion_ms"] for request in requests]
++        token_intervals = [interval for request in requests for interval in request["token_intervals_ms"]]
++        summary.append({
++            "mode": mode,
++            "scenario": scenario,
++            "repetitions": len(rows),
++            "request_count": len(requests),
++            "ttft_ms_median": statistics.median(ttft),
++            "completion_ms_median": statistics.median(completion),
++            "token_interval_ms_median": statistics.median(token_intervals),
++            "throughput_tok_s_mean": statistics.mean(row["throughput_tok_s"] for row in rows),
++            "cpu_seconds_mean": statistics.mean(row["cpu_seconds"] for row in rows),
++            "failures": sum(any(request["stop_type"] not in ("limit", None) for request in row["requests"]) for row in rows),
++            "cancellations": sum(request["cancelled_by_client"] for request in requests),
++            "grouped_token_events": sum(request["n_grouped_token_events"] for request in requests),
++        })
++    return summary
++
++
++def start_server(args, mode, threads, threads_batch, port, trace):
++    log_path = args.output / "logs" / f"{args.kind}-{mode}-t{threads}-tb{threads_batch}.log"
++    command = [
++        str(args.server),
++        "-m", str(args.model),
++        "--host", "127.0.0.1",
++        "--port", str(port),
++        "-c", "12288",
++        "-np", "4",
++        "-b", "512",
++        "-ub", "256",
++        "-t", str(threads),
++        "-tb", str(threads_batch),
++        "--server-compute-profile-mode", mode,
++        "--no-ui",
++    ]
++    if trace:
++        command.extend(["--server-compute-profile-trace", "--verbose"])
++
++    log_file = log_path.open("w", encoding="utf-8")
++    process = subprocess.Popen(command, stdout=log_file, stderr=subprocess.STDOUT)
++    base_url = f"http://127.0.0.1:{port}"
++    try:
++        wait_ready(base_url, process)
++    except Exception:
++        process.terminate()
++        process.wait(timeout=10)
++        log_file.close()
++        raise
++    return process, log_file, base_url, command
++
++
++def stop_server(process, log_file):
++    process.terminate()
++    try:
++        process.wait(timeout=10)
++    except subprocess.TimeoutExpired:
++        process.kill()
++        process.wait(timeout=10)
++    log_file.close()
++
++
++def run_functional(args):
++    records = []
++    commands = []
++    tokenizers = {}
++    configurations = [
++        ("legacy", 2, 6, 19101),
++        ("auto", 2, 6, 19102),
++        ("phase", 2, 6, 19103),
++        ("legacy", 6, 6, 19104),
++        ("auto", 6, 6, 19105),
++        ("phase", 6, 6, 19106),
++    ]
++
++    for mode, threads, threads_batch, port in configurations:
++        process, log_file, base_url, command = start_server(args, mode, threads, threads_batch, port, True)
++        commands.append(command)
++        try:
++            prompts = make_exact_prompts(base_url)
++            tokenizers[f"{mode}-t{threads}-tb{threads_batch}"] = {
++                key: value for key, value in prompts.items() if not key.startswith("prompt_")
++            }
++            scenarios = ["S1", "S2", "S3", "S4", "S5"] if threads != threads_batch else ["S1"]
++            for scenario in scenarios:
++                result = SCENARIOS[scenario](base_url, prompts)
++                records.append({
++                    "mode": mode,
++                    "threads": threads,
++                    "threads_batch": threads_batch,
++                    "scenario": scenario,
++                    **result,
++                })
++        finally:
++            stop_server(process, log_file)
++
++    def find(mode, threads, scenario):
++        return next(row for row in records if row["mode"] == mode and row["threads"] == threads and row["scenario"] == scenario)
++
++    assertions = {}
++    for threads in (2, 6):
++        legacy = find("legacy", threads, "S1")["requests"][0]
++        auto = find("auto", threads, "S1")["requests"][0]
++        assertions[f"legacy_auto_s1_t{threads}"] = {
++            "tokens_equal": legacy["tokens"] == auto["tokens"],
++            "stop_type_equal": legacy["stop_type"] == auto["stop_type"],
++            "legacy_stop_type": legacy["stop_type"],
++            "auto_stop_type": auto["stop_type"],
++        }
++
++    (args.output / "raw" / "functional.json").write_text(json.dumps(records, indent=2), encoding="utf-8")
++    (args.output / "analysis" / "functional-assertions.json").write_text(json.dumps(assertions, indent=2), encoding="utf-8")
++    (args.output / "tokenizer.json").write_text(json.dumps(tokenizers, indent=2), encoding="utf-8")
++    (args.output / "commands-functional.json").write_text(json.dumps(commands, indent=2), encoding="utf-8")
++
++
++def run_performance(args):
++    records = []
++    commands = []
++    order = [(mode, scenario, repetition) for mode in ("legacy", "auto", "phase") for scenario in ("S1", "S3", "S4") for repetition in range(5)]
++    random.Random(WORKLOAD_SEED).shuffle(order)
++
++    servers = {}
++    ports = {"legacy": 19201, "auto": 19202, "phase": 19203}
++    try:
++        for mode in ("legacy", "auto", "phase"):
++            process, log_file, base_url, command = start_server(args, mode, 2, 6, ports[mode], False)
++            commands.append(command)
++            servers[mode] = (process, log_file, base_url, make_exact_prompts(base_url))
++
++        for mode, scenario, repetition in order:
++            process, _, base_url, prompts = servers[mode]
++            cpu_start = process_cpu_seconds(process.pid)
++            wall_start = time.monotonic_ns()
++            result = SCENARIOS[scenario](base_url, prompts)
++            wall_end = time.monotonic_ns()
++            cpu_end = process_cpu_seconds(process.pid)
++            requests = [compact_request(request) for request in result["requests"]]
++            n_tokens = sum(request["n_tokens"] for request in requests)
++            records.append({
++                "mode": mode,
++                "scenario": scenario,
++                "repetition": repetition,
++                "workload_seed": WORKLOAD_SEED,
++                "request_seed": REQUEST_SEED,
++                "wall_ms": (wall_end - wall_start) / 1e6,
++                "cpu_seconds": cpu_end - cpu_start,
++                "throughput_tok_s": n_tokens / ((wall_end - wall_start) / 1e9),
++                "requests": requests,
++            })
++    finally:
++        for process, log_file, _, _ in servers.values():
++            stop_server(process, log_file)
++
++    summary = summarize_performance(records)
++    (args.output / "raw" / "performance.json").write_text(json.dumps(records, indent=2), encoding="utf-8")
++    (args.output / "analysis" / "performance-summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
++    (args.output / "execution-order.json").write_text(json.dumps(order, indent=2), encoding="utf-8")
++    (args.output / "commands-performance.json").write_text(json.dumps(commands, indent=2), encoding="utf-8")
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("kind", choices=("functional", "performance"))
++    parser.add_argument("--server", type=Path, required=True)
++    parser.add_argument("--model", type=Path, required=True)
++    parser.add_argument("--output", type=Path, required=True)
++    args = parser.parse_args()
++
++    args.server = args.server.resolve()
++    args.model = args.model.resolve()
++    args.output = args.output.resolve()
++    if args.kind == "functional":
++        run_functional(args)
++    else:
++        run_performance(args)
++
++
++if __name__ == "__main__":
++    main()
