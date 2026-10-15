@@ -627,6 +627,8 @@ struct common_params {
     common_server_compute_profile_mode server_compute_profile_mode = COMMON_SERVER_COMPUTE_PROFILE_MODE_LEGACY;
     bool    server_compute_profile_trace = false;
     uint64_t scx_phase_run_id = 0;
+    std::string scx_phase_mode = "off";
+    bool scx_phase_mode_explicit = false;
     int32_t n_ctx_checkpoints   = 32;    // max number of context checkpoints per slot
     int32_t checkpoint_min_step = 8192;  // minimum spacing between context checkpoints
     int32_t cache_ram_mib       = 8192;  // -1 = no limit, 0 - disable, 1 = 1 MiB, etc.

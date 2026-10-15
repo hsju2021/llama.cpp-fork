@@ -842,6 +842,18 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
     // parse all CLI args now, so that -hf is available below for remote preset resolution
     parse_cli_args();
 
+    if (!params.scx_phase_mode_explicit) {
+        params.scx_phase_mode = params.scx_phase_run_id ? "trace" : "off";
+    }
+    if ((params.scx_phase_mode == "off") != (params.scx_phase_run_id == 0)) {
+        throw std::invalid_argument("SCX trace/state requires a nonzero run ID; off forbids a run ID");
+    }
+#ifndef LLAMA_SCX_PHASE_TRACE
+    if (params.scx_phase_mode != "off") {
+        throw std::invalid_argument("rebuild on Linux with LLAMA_SCX_PHASE_TRACE=ON");
+    }
+#endif
+
     postprocess_cpu_params(params.cpuparams,       nullptr);
     postprocess_cpu_params(params.cpuparams_batch, &params.cpuparams);
 
@@ -3463,6 +3475,17 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.n_threads_http = value;
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_THREADS_HTTP"));
+    add_opt(common_arg(
+        {"--scx-phase-mode"}, "MODE",
+        "select sched_ext mode: off, trace, or state (default: off; run ID alone selects trace)",
+        [](common_params & params, const std::string & value) {
+            if (value != "off" && value != "trace" && value != "state") {
+                throw std::invalid_argument("SCX mode must be off, trace, or state");
+            }
+            params.scx_phase_mode = value;
+            params.scx_phase_mode_explicit = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"--scx-phase-run-id"}, "UINT64",
         "enable experimental sched_ext phase markers for a nonzero decimal run ID (Linux trace build only)",

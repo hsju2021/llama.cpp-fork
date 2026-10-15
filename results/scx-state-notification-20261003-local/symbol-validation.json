@@ -1,0 +1,74 @@
+[
+  {
+    "variant": "on-openmp",
+    "binaries": {
+      "libllama-server-impl.so": {
+        "sha256": "a7d43e43214304580ea0cd5274bda3d296c8843c0a8c38ffe73a48ff00c328e9",
+        "phase_symbols": [
+          "llama_scx_decode_begin_v1",
+          "llama_scx_decode_end_v1",
+          "llama_scx_phase_set_v2"
+        ],
+        "worker_symbols": []
+      },
+      "libggml-cpu.so": {
+        "sha256": "29e43ac964c002d6d966a4089373e4580e6979ac8013d13c5d0fac7df7bf8ccc",
+        "phase_symbols": [],
+        "worker_symbols": []
+      }
+    },
+    "result": "PASS"
+  },
+  {
+    "variant": "off-openmp",
+    "binaries": {
+      "libllama-server-impl.so": {
+        "sha256": "6036f6d3264aa1601c33bef6d67685840ce15bf4a657e5e89173cff7b5e9b44d",
+        "phase_symbols": [],
+        "worker_symbols": []
+      },
+      "libggml-cpu.so": {
+        "sha256": "eeb2f82aca14c16bde37ab4a7a6206047623271bdaf24219cc44c5d87bfe894f",
+        "phase_symbols": [],
+        "worker_symbols": []
+      }
+    },
+    "result": "PASS"
+  },
+  {
+    "variant": "on-native",
+    "binaries": {
+      "libllama-server-impl.so": {
+        "sha256": "6f8c40a2bdee4a931b54847254c345833c2fc3d785ea79545d5fa9d0d0c45fd5",
+        "phase_symbols": [
+          "llama_scx_decode_begin_v1",
+          "llama_scx_decode_end_v1",
+          "llama_scx_phase_set_v2"
+        ],
+        "worker_symbols": []
+      },
+      "libggml-cpu.so": {
+        "sha256": "6b7c5aa748619560283cde6e03ee53b65c6dc3c341a5890220da52e74f2d3c39",
+        "phase_symbols": [],
+        "worker_symbols": []
+      }
+    },
+    "result": "PASS"
+  },
+  {
+    "variant": "off-native",
+    "binaries": {
+      "libllama-server-impl.so": {
+        "sha256": "7c7d29a091afe7dee56bd34657c9e111840bf11792778d25a5a99066bf17232e",
+        "phase_symbols": [],
+        "worker_symbols": []
+      },
+      "libggml-cpu.so": {
+        "sha256": "09c91e7656b75fd811b96942145eebb19ce65f2483750135c03b9f00058b162e",
+        "phase_symbols": [],
+        "worker_symbols": []
+      }
+    },
+    "result": "PASS"
+  }
+]

@@ -1,0 +1,19 @@
+{
+  "date": "2026-10-03",
+  "provider_base": "64f4f972a2758d3a730ce78f92aaa05406de40a0",
+  "provider_branch": "codex/scx-state-notification",
+  "scheduler_base": "ffc03c82738e31977cf402061422b0ef0148fe67",
+  "provider_builds": 4,
+  "provider_ctest_passed": 14,
+  "cpu_backend_cases_passed": 400,
+  "scheduler_cases": 64,
+  "scheduler_passed": 62,
+  "scheduler_skipped": 2,
+  "kernel_load_run": false,
+  "model_workload_run": false,
+  "full_make_check": "blocked by missing /sys/kernel/sched_ext/state on WSL",
+  "scheduler_binaries": {
+    "bin/llama_scx_simple": "812a7e179fa81a4b4c9b9ecd97bc440d181bbda433ee2bfecacdb12fa3562b1c",
+    "llama_scx_simple.bpf.o": "e9af281e00a14f2c952ddc83c9e33ef51428f7658e697c7b231a0f9929bd6e26"
+  }
+}

@@ -23,6 +23,7 @@
 #include <cinttypes>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <filesystem>
 #include <set>
 #include <sstream>
@@ -74,9 +75,9 @@ enum server_batch_phase {
     SERVER_BATCH_PHASE_MIXED,
 };
 
-#ifdef LLAMA_SCX_PHASE_TRACE
 static_assert(SERVER_BATCH_PHASE_UNKNOWN == 0 && SERVER_BATCH_PHASE_PREFILL == 1 &&
-        SERVER_BATCH_PHASE_DECODE == 2 && SERVER_BATCH_PHASE_MIXED == 3, "SCX phase ABI v1");
+        SERVER_BATCH_PHASE_DECODE == 2 && SERVER_BATCH_PHASE_MIXED == 3, "server phase classifier ABI");
+#ifdef LLAMA_SCX_PHASE_TRACE
 static_assert(LLAMA_COMPUTE_PROFILE_AUTO == 0 && LLAMA_COMPUTE_PROFILE_GENERATION == 1 &&
         LLAMA_COMPUTE_PROFILE_BATCH == 2, "SCX profile ABI v1");
 #endif
@@ -1025,6 +1026,27 @@ private:
     std::set<std::string> model_tags;    // informational tags
 
     bool sleeping = false;
+#ifdef LLAMA_SCX_PHASE_TRACE
+    server_scx_state_publisher scx_state;
+#endif
+
+    void scx_clear_state() {
+#ifdef LLAMA_SCX_PHASE_TRACE
+        if (params_base.scx_phase_mode == "state") {
+            if (ctx_tgt) { llama_synchronize(ctx_tgt); }
+            scx_state.reconcile(params_base.scx_phase_run_id, false, llama_scx_phase_set_v2);
+        }
+#endif
+    }
+
+    void scx_reconcile_idle() {
+#ifdef LLAMA_SCX_PHASE_TRACE
+        if (params_base.scx_phase_mode == "state") {
+            const bool processing = std::any_of(slots.begin(), slots.end(), [](const server_slot & slot) { return slot.is_processing(); });
+            scx_state.reconcile(params_base.scx_phase_run_id, processing, llama_scx_phase_set_v2);
+        }
+#endif
+    }
 
     int64_t t_last_load_progress_ms = 0;
 
@@ -1048,6 +1070,7 @@ private:
         GGML_ASSERT(sleeping != new_state);
         if (new_state) {
             SRV_INF("%s", "server is entering sleeping state\n");
+            scx_clear_state();
             destroy();
         } else {
             SRV_INF("%s", "server is exiting sleeping state\n");
@@ -2844,6 +2867,9 @@ private:
 #endif
 
     void update_slots() {
+#ifdef LLAMA_SCX_PHASE_TRACE
+        server_scx_reconcile_scope scx_guard([this]() { scx_reconcile_idle(); }, [this]() { scx_clear_state(); });
+#endif
 #ifdef DEBUG_TIMINGS
         static int64_t t_prev = 0;
         int64_t t_start = ggml_time_us();
@@ -3731,16 +3757,7 @@ private:
             }
         }
 
-        server_batch_phase phase = SERVER_BATCH_PHASE_UNKNOWN;
-        if (n_unknown == 0) {
-            if (n_prefill > 0 && n_decode > 0) {
-                phase = SERVER_BATCH_PHASE_MIXED;
-            } else if (n_prefill > 0) {
-                phase = SERVER_BATCH_PHASE_PREFILL;
-            } else if (n_decode > 0) {
-                phase = SERVER_BATCH_PHASE_DECODE;
-            }
-        }
+        const auto phase = server_batch_phase(server_scx_classify_phase(n_prefill, n_decode, n_unknown));
 
         llama_compute_profile requested_profile = LLAMA_COMPUTE_PROFILE_AUTO;
         const bool use_options = profile_mode != COMMON_SERVER_COMPUTE_PROFILE_MODE_LEGACY;
@@ -3775,8 +3792,15 @@ private:
         }
 
 #ifdef LLAMA_SCX_PHASE_TRACE
-        server_scx_scope scx_scope(ctx_tgt, { 1, params_base.scx_phase_run_id, call_id, uint64_t(retry),
-                uint64_t(phase), uint64_t(requested_profile), uint64_t(n_prefill), uint64_t(n_decode), uint64_t(n_unknown), -1 });
+        std::optional<server_scx_scope> scx_scope;
+        if (params_base.scx_phase_mode == "trace") {
+            scx_scope.emplace(ctx_tgt, server_scx_event { 1, params_base.scx_phase_run_id, call_id, uint64_t(retry),
+                    uint64_t(phase), uint64_t(requested_profile), uint64_t(n_prefill), uint64_t(n_decode), uint64_t(n_unknown), -1 });
+        }
+        server_scx_state_sync scx_sync(ctx_tgt, params_base.scx_phase_mode == "state");
+        if (params_base.scx_phase_mode == "state") {
+            scx_state.publish(params_base.scx_phase_run_id, uint32_t(phase), true, llama_scx_phase_set_v2);
+        }
 #endif
         int ret;
         if (use_options) {
@@ -3789,7 +3813,8 @@ private:
 
         const int64_t t_return_us = ggml_time_us();
 #ifdef LLAMA_SCX_PHASE_TRACE
-        scx_scope.finish(ret);
+        if (scx_scope) { scx_scope->finish(ret); }
+        scx_sync.finish();
 #endif
         int64_t t_complete_us = t_return_us;
         if (trace_profile && ret == 0) {
@@ -4154,7 +4179,13 @@ bool server_context::load_model(common_params & params) {
 
 void server_context::start_loop() {
     auto & params = impl->params_base;
-    impl->queue_tasks.start_loop(params.sleep_idle_seconds * 1000);
+    try {
+        impl->queue_tasks.start_loop(params.sleep_idle_seconds * 1000);
+    } catch (...) {
+        impl->scx_clear_state();
+        throw;
+    }
+    impl->scx_clear_state();
 }
 
 void server_context::terminate() {
