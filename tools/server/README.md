@@ -336,6 +336,10 @@ The server includes a set of built-in tools that enable the LLM to access the lo
 
 To use this feature, start the server with `--tools all`. You can also enable only specific tools by passing a comma-separated list: `--tools name1,name2,...`. Run `--help` for the full list of available tool names.
 
+### Experimental mixed prefill
+
+The local fork provides `--mixed-prefill-policy cap128` as a fixed mixed-batch control and `--mixed-prefill-policy head64` as a CPU experiment. The default is `none`. See the [supported configurations](../../docs/development/compute-profile.md#experimental-mixed-prefill-policy).
+
 ## Build
 
 `llama-server` is built alongside everything else from the root of the project

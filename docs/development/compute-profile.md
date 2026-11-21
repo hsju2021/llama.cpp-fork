@@ -105,6 +105,18 @@ Use `--server-compute-profile-trace` to log the run, task and slot IDs, decode c
 
 The initial server connection is limited to the target decoder batch assembled in `server_context`. Internal speculative, multimodal, encoder, and maintenance decode paths retain their existing `AUTO` behavior.
 
+## Experimental mixed prefill policy
+
+`llama-server --mixed-prefill-policy cap128` caps prompt tokens at 128 per submitted batch when the batch contains decode tokens. Decode tokens are queued in their existing order before prompt work. The budget is shared across eligible prompts. A prompt that must run as a unit waits if it exceeds the remaining mixed budget. With no option (or with `none`), the server uses its existing batching limits. Prefill-only and decode-only batches use those limits in all three modes.
+
+`--mixed-prefill-policy head64` uses the same cap and submits 64 prompt tokens at a time once a qualifying uncached 6144-token newcomer has processed 2048 tokens. It requires four one-token incumbent decodes on consecutive slot IDs, with the newcomer outside that run and not immediately after it. This keeps the four decode tokens separate from the 64-token prompt ubatch. The server uses its regular slot assignment.
+
+The experimental path requires CPU-only Qwen2 attention with 12 query heads, two KV heads, 128-wide heads, FP16 K and V, causal Flash Attention explicitly enabled, non-unified KV, a 128-token physical batch, at least 132 logical batch tokens, and six generation and batch workers. Use `-ngl 0 -fa on -ub 128 -t 6 -tb 6 --no-kv-unified` with a native CPU build providing AVX2 and F16C and with OpenMP and BLAS disabled. The fast path is limited to plain text completion without speculative decoding, LoRA, multimedia, embeddings, or NUMA placement.
+
+On eligible prompt ubatches the CPU Flash Attention kernel assigns a complete query tile to each head and packs FP16 K and V with AVX2/F16C. Scalar conversion handles exceptional FP16 values, non-nearest rounding, and incomplete K tiles. Other workload shapes or configurations use the cap128 policy and ordinary kernels. A split or retried decode call does not carry the experimental kernel hint.
+
+For diagnostics, `--server-compute-profile-trace` records the logical batch and admitted head64 positions. Verbose libllama logging shows the marked physical ubatch. Use trace-free runs when measuring TTFT, throughput, or SSE gaps.
+
 ## Optional sched_ext phase markers
 
 On Linux, `-DLLAMA_SCX_PHASE_TRACE=ON` adds experimental markers for the sibling llama-scheduler project. The option defaults to OFF and requires the bundled CPU backend without GPU or BLAS backends. Enabled modes require a nonzero `--scx-phase-run-id UINT64` and explicit `-ngl 0`. Only single-context decoder-only text generation is supported; speculative, multimodal, and embedding modes are rejected.
