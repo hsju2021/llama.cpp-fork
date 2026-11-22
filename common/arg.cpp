@@ -3513,6 +3513,21 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SERVER_COMPUTE_PROFILE_MODE"));
     add_opt(common_arg(
+        {"--mixed-prefill-policy"}, "MODE",
+        "experimental mixed-batch prefill policy: none, cap128, or head64 (default: none; head64 falls back to cap128)",
+        [](common_params & params, const std::string & value) {
+            if (value == "none") {
+                params.mixed_prefill_policy = COMMON_MIXED_PREFILL_POLICY_NONE;
+            } else if (value == "cap128") {
+                params.mixed_prefill_policy = COMMON_MIXED_PREFILL_POLICY_CAP128;
+            } else if (value == "head64") {
+                params.mixed_prefill_policy = COMMON_MIXED_PREFILL_POLICY_HEAD64;
+            } else {
+                throw std::invalid_argument("expected one of: none, cap128, head64");
+            }
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"--server-compute-profile-trace"},
         "log semantic batch phases and synchronize traced decode calls (default: disabled)",
         [](common_params & params) {
