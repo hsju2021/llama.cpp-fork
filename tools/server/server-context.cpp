@@ -537,13 +537,14 @@ struct server_slot {
     void handle_last_sampled_token(server_batch & batch) {
         bool add_ok = true;
         if (spec_draft.empty()) {
-            // no speculative decoding
+            // No draft tokens in this step.
             i_batch = batch.size();
 
             if (!inp_embd.empty()) {
-                add_ok &= batch.add(id, task->id, inp_embd, prompt.tokens.pos_next(), true, SERVER_BATCH_PHASE_DECODE);
+                add_ok &= batch.add(id, task->id, inp_embd, prompt.tokens.pos_next(), true, SERVER_BATCH_PHASE_UNKNOWN);
             } else {
-                add_ok &= batch.add(id, task->id, sampled, prompt.tokens.pos_next(), true, SERVER_BATCH_PHASE_DECODE);
+                const auto phase = can_speculate() ? SERVER_BATCH_PHASE_UNKNOWN : SERVER_BATCH_PHASE_DECODE;
+                add_ok &= batch.add(id, task->id, sampled, prompt.tokens.pos_next(), true, phase);
             }
 
             SLT_DBG(*this, "slot decode token, id=%d, n_ctx = %d, n_tokens = %d, truncated = %d\n",
@@ -561,9 +562,10 @@ struct server_slot {
 
             auto pos0 = prompt.tokens.pos_next();
 
-            add_ok &= batch.add(id, task->id, sampled, pos0++, true, SERVER_BATCH_PHASE_DECODE);
+            // Speculative verification batches fall back to AUTO in phase mode.
+            add_ok &= batch.add(id, task->id, sampled, pos0++, true, SERVER_BATCH_PHASE_UNKNOWN);
             for (auto token : spec_draft) {
-                add_ok &= batch.add(this->id, task->id, token, pos0++, true, SERVER_BATCH_PHASE_DECODE);
+                add_ok &= batch.add(this->id, task->id, token, pos0++, true, SERVER_BATCH_PHASE_UNKNOWN);
             }
         }
 
@@ -3610,6 +3612,10 @@ private:
 
                     const auto & spans = slot.task->params.message_spans;
                     const auto last_user_pos = spans.last_user_message_pos();
+                    const bool slot_need_embd = slot.need_embd();
+                    const auto prompt_phase = (slot_need_embd || slot.can_speculate())
+                        ? SERVER_BATCH_PHASE_UNKNOWN
+                        : SERVER_BATCH_PHASE_PREFILL;
 
                     // add prompt tokens for processing in the current batch
                     while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.size() < n_batch) {
@@ -3627,15 +3633,13 @@ private:
                             break;
                         }
 
-                        // embedding requires all tokens in the batch to be output;
-                        // MTP also wants logits at every prompt position so the
-                        // streaming hook can mirror t_h_nextn into ctx_dft.
+                        // Embedding extraction requires output for every prompt token.
                         add_ok &= batch.add(slot.id,
                             slot.task->id,
                             cur_tok,
                             slot.prompt.tokens.pos_next(),
-                            slot.need_embd(),
-                            SERVER_BATCH_PHASE_PREFILL);
+                            slot_need_embd,
+                            prompt_phase);
                         slot.prompt.tokens.push_back(cur_tok);
 
                         slot.n_prompt_tokens_processed++;
@@ -3799,8 +3803,9 @@ private:
             }
         }
 
-        const uint64_t call_id = ++compute_profile_call_id;
-        const int64_t t_start_us = ggml_time_us();
+        const bool need_call_id = trace_profile || params_base.scx_phase_mode == "trace";
+        const uint64_t call_id = need_call_id ? ++compute_profile_call_id : 0;
+        const int64_t t_start_us = trace_profile ? ggml_time_us() : 0;
 
         auto format_ids = [](const std::set<int> & ids) {
             std::ostringstream ss;
@@ -3840,19 +3845,18 @@ private:
         } else {
             ret = llama_decode(ctx_tgt, batch_view);
         }
+        const int64_t t_return_us = trace_profile ? ggml_time_us() : 0;
 
-        const int64_t t_return_us = ggml_time_us();
 #ifdef LLAMA_SCX_PHASE_TRACE
         if (scx_scope) { scx_scope->finish(ret); }
         scx_sync.finish();
 #endif
-        int64_t t_complete_us = t_return_us;
-        if (trace_profile && ret == 0) {
-            llama_synchronize(ctx_tgt);
-            t_complete_us = ggml_time_us();
-        }
-
         if (trace_profile) {
+            int64_t t_complete_us = t_return_us;
+            if (ret == 0) {
+                llama_synchronize(ctx_tgt);
+                t_complete_us = ggml_time_us();
+            }
             SRV_INF("compute_profile_trace end: run=%" PRId64 " call=%" PRIu64 " retry=%d ret=%d t_return_us=%" PRId64 " t_complete_us=%" PRId64 " return_elapsed_us=%" PRId64 " complete_elapsed_us=%" PRId64 "\n",
                     compute_profile_run_id, call_id, retry, ret, t_return_us, t_complete_us, t_return_us - t_start_us, t_complete_us - t_start_us);
         }

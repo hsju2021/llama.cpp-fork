@@ -31,7 +31,7 @@ The profiles select resources already configured on the context:
 
 Set the thread counts through `llama_context_params` when creating the context or with `llama_set_n_threads()`. Use `llama_attach_threadpool()` to attach explicit threadpools. If `threadpool_batch` is `NULL`, libllama uses `threadpool` for both profiles.
 
-The return values and memory-state behavior are the same as for `llama_decode()`. An invalid `compute_profile` returns `-1` before the batch is decoded.
+The return values and memory-state behavior are the same as for `llama_decode()`. A `NULL` context or an invalid `compute_profile` returns `-1` before the batch is decoded.
 
 ## Profile meanings
 
@@ -99,11 +99,11 @@ Libllama does not reinterpret an explicit profile from batch contents, regroup r
 | `auto` | Calls `llama_decode_with_options()` with `LLAMA_COMPUTE_PROFILE_AUTO`. |
 | `phase` | Requests `BATCH` for prompt-only work, `GENERATION` for generation-only work, and `AUTO` for mixed or unsupported work. |
 
-The server records token origin when it adds tokens to its shared batch. It classifies each submitted `batch_view`, including split and retry ranges, from those recorded origins. A final prompt token remains prompt work even though its logits produce the first sampled token. Batching generated tokens from multiple slots remains generation work.
+The server records token origin when it adds tokens to its shared batch. It classifies each submitted `batch_view` from the tokens in that view, including each split or retry range. In the trace, `n_unknown` counts tokens in the submitted `batch_view` excluded from explicit phase routing. In `phase` mode, counts of `(n_prefill, n_decode, n_unknown) = (4, 3, 0)` produce `MIXED` with `AUTO`, and `(4, 3, 1)` produces `UNKNOWN` with `AUTO`. The final eligible prompt token counts as `PREFILL`, and eligible generated tokens from multiple slots count as `DECODE`.
 
-Use `--server-compute-profile-trace` to log the run, task and slot IDs, decode call and retry IDs, submitted range, token counts, phase, requested profile, return value, and monotonic timestamps in microseconds. Tracing synchronizes successful decode calls so that the logged completion timestamp covers computation completion; use it only for diagnostics. Add `--verbose` to include libllama physical-ubatch profile selection and CPU planned/actual team-size debug logs.
+Use `--server-compute-profile-trace` to log the run, task and slot IDs, decode call and retry IDs, submitted range, token counts, phase, requested profile, return value, and monotonic timestamps in microseconds. The return timestamp is taken immediately after decode returns, before SCX post-decode synchronization. Successful calls record the completion timestamp after synchronization. Failed and retryable calls use the return timestamp for both fields. Use tracing only for diagnostics. Add `--verbose` to include libllama physical-ubatch profile selection and CPU planned/actual team-size debug logs.
 
-The initial server connection is limited to the target decoder batch assembled in `server_context`. Internal speculative, multimodal, encoder, and maintenance decode paths retain their existing `AUTO` behavior.
+The target decoder batch tags embedding extraction tokens, `inp_embd` inputs, and every token from an initialized speculative slot (including MTP and ngram) as `UNKNOWN`, which selects `AUTO` in `phase` mode. This covers prompt tokens, sampled steps with an empty draft, and verification steps. Multimodal media chunks use a separate internal decode and fall outside the shared batch counts. Eligible text in that shared batch still uses `PREFILL` or `DECODE`. Internal speculative, multimodal, encoder, and maintenance decode paths use `AUTO`.
 
 ## Optional sched_ext phase markers
 

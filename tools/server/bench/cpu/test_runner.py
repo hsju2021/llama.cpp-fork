@@ -341,6 +341,136 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(all(r["status"] == "not_started" for r in json.loads((output / "trials.json").read_text())))
         self.assertEqual(json.loads((output / "summary.json").read_text())["status"], "cancelled")
 
+    def test_cgroups_mountinfo_empty_source(self):
+        cgroup_root = self.directory / "cg2"
+        (cgroup_root / "app").mkdir(parents=True)
+        (cgroup_root / "app" / "cpu.max").write_text("max 100000\n")
+        mountinfo = "\n".join([
+            "824 31 0:74 / / ro,relatime - tmpfs  rw,seclabel",
+            "826 824 0:77 / /proc rw,nosuid - proc  rw",
+            f"827 824 0:78 / {cgroup_root} rw,nosuid - cgroup2  rw",
+        ]) + "\n"
+        membership = "0::/app\n"
+        real_read_text = Path.read_text
+
+        def fake_read_text(path, *args, **kwargs):
+            if str(path) == "/proc/999999/cgroup":
+                return membership
+            if str(path) == "/proc/999999/mountinfo":
+                return mountinfo
+            return real_read_text(path, *args, **kwargs)
+
+        with patch.object(Path, "read_text", fake_read_text):
+            parsed = runner.cgroups(999999)
+        self.assertEqual(parsed["quota_and_cpuset_ancestors"][str(cgroup_root / "app" / "cpu.max")], "max 100000\n")
+
+    def test_cgroups_mount_paths(self):
+        member_mount = self.directory / "member"
+        sibling_mount = self.directory / "sibling"
+        escaped_mount = self.directory / "with space\tand\nbackslash\\"
+        worker = escaped_mount / "..worker"
+        for directory, quota in ((member_mount, "20000"), (sibling_mount, "30000"),
+                                 (escaped_mount, "40000"), (worker, "10000")):
+            directory.mkdir()
+            (directory / "cpu.max").write_text(f"{quota} 100000\n")
+
+        escaped_path = self.directory / r"with\040space\011and\012backslash\134"
+        cases = [
+            ("/team/a", [
+                f"827 824 0:78 /team/a {member_mount} rw - cgroup2 cgroup rw",
+                f"828 824 0:78 /team/ab {sibling_mount} rw - cgroup2 cgroup rw",
+            ], {str(member_mount / "cpu.max"): "20000 100000\n"}),
+            ("/../sibling", [
+                f"827 824 0:78 / {member_mount} rw - cgroup2 cgroup rw",
+            ], {}),
+            ("//team a/..worker", [
+                rf"827 824 0:78 /team\040a {escaped_path} rw - cgroup2 cgroup rw",
+            ], {str(worker / "cpu.max"): "10000 100000\n", str(escaped_mount / "cpu.max"): "40000 100000\n"}),
+        ]
+        real_read_text = Path.read_text
+        for member, mounts, expected in cases:
+            with self.subTest(member=member):
+                proc_files = {"/proc/999999/cgroup": f"0::{member}\n", "/proc/999999/mountinfo": "\n".join(mounts)}
+
+                def fake_read_text(path, *args, **kwargs):
+                    if str(path) in proc_files:
+                        return proc_files[str(path)]
+                    return real_read_text(path, *args, **kwargs)
+
+                with patch.object(Path, "read_text", fake_read_text):
+                    parsed = runner.cgroups(999999)
+                self.assertEqual(parsed["quota_and_cpuset_ancestors"], expected)
+
+    def test_loaded_libraries_matches_shared_object_basename(self):
+        real_read_text = Path.read_text
+        real_so = self.directory / "libreal.so.1"
+        real_so.write_bytes(b"elf")
+        mapped_so = self.directory / "libalias.so"
+        mapped_so.symlink_to(real_so)
+        deleted_so = "/usr/lib/libggml-cpu.so.0 (deleted)"
+        non_library = "/usr/share/dir.so/data"
+        maps = "\n".join([
+            f"7f0000-7f1000 r-xp 00000000 00:01 1 {mapped_so}",
+            f"7f2000-7f3000 r-xp 00000000 00:01 2 {deleted_so}",
+            f"7f4000-7f5000 r--p 00000000 00:01 3 {non_library}",
+        ]) + "\n"
+        with patch.object(Path, "read_text", lambda path, *a, **kw: maps if str(path) == "/proc/999999/maps" else real_read_text(path, *a, **kw)):
+            libs = runner.loaded_libraries(999999)
+        by_path = {entry["path"]: entry for entry in libs}
+        self.assertEqual(by_path[str(mapped_so)]["sha256"], runner.sha256(real_so))
+        self.assertEqual(by_path[deleted_so], {"path": deleted_so, "deleted": True})
+        self.assertNotIn(non_library, by_path)
+
+    def test_campaign_library_provenance(self):
+        config = self.config()
+        config["workloads"] = ["d1"]
+        Path(config["model"]).write_bytes(b"model-free fixture identity")
+        Path(config["build_cache"]).write_text("FIXTURE_ONLY:BOOL=ON\n")
+        real_read_text = Path.read_text
+
+        def command(config, condition, port):
+            return [sys.executable, str(FIXTURE), "--port", str(port)]
+
+        for basename, deleted, required in (
+                ("libstdc++.so.6", True, False),
+                ("libnss_fixture.so.2", False, False),
+                ("libggml-cpu.so.0", True, True),
+                ("libgomp.so.1", False, True)):
+            with self.subTest(library=basename):
+                library_path = str(self.directory / basename) + (" (deleted)" if deleted else "")
+
+                def fake_read_text(path, *args, **kwargs):
+                    if path.parent.parent == Path("/proc") and path.name == "maps":
+                        return f"7f0000-7f1000 r-xp 00000000 00:01 1 {library_path}\n"
+                    return real_read_text(path, *args, **kwargs)
+
+                output = self.directory / f"campaign-{basename}"
+                with (
+                    patch.object(Path, "read_text", fake_read_text),
+                    patch.object(runner, "server_command", command),
+                    patch.object(runner, "existing_servers", return_value=[]),
+                    patch.object(runner, "workload", wraps=runner.workload) as workload,
+                ):
+                    self.assertEqual(runner.run_campaign(config, output, self.cancel), int(required))
+
+                row, = json.loads((output / "trials.json").read_text())
+                self.assertEqual(row["status"], "failed" if required else "ok")
+                self.assertTrue(row["cleanup"]["leader_reaped"])
+                trial = output / "trial-0000"
+                environment = json.loads((trial / "server-environment.json").read_text())
+                self.assertIs(environment["libraries_complete"], False)
+                library, = environment["incomplete_libraries"]
+                self.assertEqual(environment["libraries"], [library])
+                self.assertEqual(library["path"], library_path)
+                self.assertTrue(library["deleted"] if deleted else library["unavailable"])
+                if required:
+                    workload.assert_not_called()
+                    self.assertIn("required library hash unavailable", row["error"])
+                    self.assertIn(library_path, row["error"])
+                else:
+                    self.assertEqual(workload.call_count, 2)
+                    self.assertTrue((trial / "measurement" / "result.json").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()
