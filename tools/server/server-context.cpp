@@ -1,4 +1,5 @@
 #include "server-context.h"
+#include "server-scx.h"
 #include "server-chat.h"
 #include "server-common.h"
 #include "server-http.h"
@@ -6,6 +7,7 @@
 #include "server-queue.h"
 #include "server-schema.h"
 #include "server-stream.h"
+#include "server-threadpool.h"
 
 #include "build-info.h"
 #include "common.h"
@@ -22,7 +24,10 @@
 #include <cinttypes>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <filesystem>
+#include <set>
+#include <sstream>
 #include <utility>
 #include <fstream>
 
@@ -64,6 +69,51 @@ enum slot_state {
     SLOT_STATE_GENERATING,
 };
 
+enum server_batch_phase {
+    SERVER_BATCH_PHASE_UNKNOWN,
+    SERVER_BATCH_PHASE_PREFILL,
+    SERVER_BATCH_PHASE_DECODE,
+    SERVER_BATCH_PHASE_MIXED,
+};
+
+static_assert(SERVER_BATCH_PHASE_UNKNOWN == 0 && SERVER_BATCH_PHASE_PREFILL == 1 &&
+        SERVER_BATCH_PHASE_DECODE == 2 && SERVER_BATCH_PHASE_MIXED == 3, "server phase classifier ABI");
+#ifdef LLAMA_SCX_PHASE_TRACE
+static_assert(LLAMA_COMPUTE_PROFILE_AUTO == 0 && LLAMA_COMPUTE_PROFILE_GENERATION == 1 &&
+        LLAMA_COMPUTE_PROFILE_BATCH == 2, "SCX profile ABI v1");
+#endif
+
+static const char * server_batch_phase_name(server_batch_phase phase) {
+    switch (phase) {
+        case SERVER_BATCH_PHASE_UNKNOWN: return "UNKNOWN";
+        case SERVER_BATCH_PHASE_PREFILL: return "PREFILL";
+        case SERVER_BATCH_PHASE_DECODE:  return "DECODE";
+        case SERVER_BATCH_PHASE_MIXED:   return "MIXED";
+    }
+
+    GGML_ABORT("invalid server batch phase");
+}
+
+static const char * server_compute_profile_name(llama_compute_profile profile) {
+    switch (profile) {
+        case LLAMA_COMPUTE_PROFILE_AUTO:       return "AUTO";
+        case LLAMA_COMPUTE_PROFILE_GENERATION: return "GENERATION";
+        case LLAMA_COMPUTE_PROFILE_BATCH:      return "BATCH";
+    }
+
+    GGML_ABORT("invalid compute profile");
+}
+
+static const char * server_compute_profile_mode_name(common_server_compute_profile_mode mode) {
+    switch (mode) {
+        case COMMON_SERVER_COMPUTE_PROFILE_MODE_LEGACY: return "legacy";
+        case COMMON_SERVER_COMPUTE_PROFILE_MODE_AUTO:   return "auto";
+        case COMMON_SERVER_COMPUTE_PROFILE_MODE_PHASE:  return "phase";
+    }
+
+    GGML_ABORT("invalid server compute profile mode");
+}
+
 struct server_slot; // forward declaration
 
 struct server_batch {
@@ -72,9 +122,11 @@ struct server_batch {
 
     struct token {
         int32_t id_slot;
+        int id_task;
         llama_token token;
         llama_pos pos;
         bool output;
+        server_batch_phase phase;
     };
     std::vector<token> tokens;
     int32_t n_tokens_alloc = 0;
@@ -110,22 +162,22 @@ struct server_batch {
         tokens.reserve(n_tokens_alloc);
     }
 
-    bool add(int32_t id_slot, llama_token token, llama_pos pos, bool output) {
+    bool add(int32_t id_slot, int id_task, llama_token token, llama_pos pos, bool output, server_batch_phase phase) {
         GGML_ASSERT(!has_embd); // cannot mix tokens + embd in same batch
         GGML_ASSERT(batch.pos != nullptr);
         if ((int32_t)tokens.size() >= n_tokens_alloc) {
             return false;
         }
-        tokens.push_back({ id_slot, token, pos, output });
+        tokens.push_back({ id_slot, id_task, token, pos, output, phase });
         return true;
     }
 
-    bool add(int32_t id_slot, const std::vector<float> & embd_in, llama_pos pos, bool output) {
+    bool add(int32_t id_slot, int id_task, const std::vector<float> & embd_in, llama_pos pos, bool output, server_batch_phase phase) {
         GGML_ASSERT(batch.pos != nullptr);
         if ((int32_t)tokens.size() >= n_tokens_alloc) {
             return false;
         }
-        tokens.push_back({ id_slot, LLAMA_TOKEN_NULL, pos, output });
+        tokens.push_back({ id_slot, id_task, LLAMA_TOKEN_NULL, pos, output, phase });
         has_embd = true;
         embd.insert(embd.end(), embd_in.begin(), embd_in.end());
         return true;
@@ -489,9 +541,9 @@ struct server_slot {
             i_batch = batch.size();
 
             if (!inp_embd.empty()) {
-                add_ok &= batch.add(id, inp_embd, prompt.tokens.pos_next(), true);
+                add_ok &= batch.add(id, task->id, inp_embd, prompt.tokens.pos_next(), true, SERVER_BATCH_PHASE_DECODE);
             } else {
-                add_ok &= batch.add(id, sampled, prompt.tokens.pos_next(), true);
+                add_ok &= batch.add(id, task->id, sampled, prompt.tokens.pos_next(), true, SERVER_BATCH_PHASE_DECODE);
             }
 
             SLT_DBG(*this, "slot decode token, id=%d, n_ctx = %d, n_tokens = %d, truncated = %d\n",
@@ -509,9 +561,9 @@ struct server_slot {
 
             auto pos0 = prompt.tokens.pos_next();
 
-            add_ok &= batch.add(id, sampled, pos0++, true);
+            add_ok &= batch.add(id, task->id, sampled, pos0++, true, SERVER_BATCH_PHASE_DECODE);
             for (auto token : spec_draft) {
-                add_ok &= batch.add(this->id, token, pos0++, true);
+                add_ok &= batch.add(this->id, task->id, token, pos0++, true, SERVER_BATCH_PHASE_DECODE);
             }
         }
 
@@ -910,14 +962,11 @@ public:
 
     server_context_impl() {
         mtmd_helper_log_set(common_log_default_callback, nullptr);
+        compute_profile_run_id = ggml_time_us();
     }
 
     ~server_context_impl() {
-        if (!sleeping) {
-            // destroy() is already called when entering sleeping state
-            // we don't call it again here to avoid double free
-            destroy();
-        }
+        destroy();
     }
 
 private:
@@ -927,6 +976,7 @@ private:
     common_params params_base;
 
     // note: keep these alive - they determine the lifetime of the model, context, etc.
+    server_threadpools threadpools;
     common_init_result_ptr llama_init;
 
     llama_context * ctx_tgt = nullptr;
@@ -957,6 +1007,8 @@ private:
     int trace = 0;
     int slots_debug = 0;
     int n_empty_consecutive = 0;
+    int64_t compute_profile_run_id = 0;
+    uint64_t compute_profile_call_id = 0;
 
     std::unique_ptr<server_prompt_cache> prompt_cache;
 
@@ -972,10 +1024,36 @@ private:
     std::set<std::string> model_tags;    // informational tags
 
     bool sleeping = false;
+#ifdef LLAMA_SCX_PHASE_TRACE
+    server_scx_state_publisher scx_state;
+#endif
+
+    void scx_clear_state() {
+#ifdef LLAMA_SCX_PHASE_TRACE
+        if (params_base.scx_phase_mode == "state") {
+            if (ctx_tgt) { llama_synchronize(ctx_tgt); }
+            scx_state.reconcile(params_base.scx_phase_run_id, false, llama_scx_phase_set_v2);
+        }
+#endif
+    }
+
+    void scx_reconcile_idle() {
+#ifdef LLAMA_SCX_PHASE_TRACE
+        if (params_base.scx_phase_mode == "state") {
+            const bool processing = std::any_of(slots.begin(), slots.end(), [](const server_slot & slot) { return slot.is_processing(); });
+            scx_state.reconcile(params_base.scx_phase_run_id, processing, llama_scx_phase_set_v2);
+        }
+#endif
+    }
 
     int64_t t_last_load_progress_ms = 0;
 
     void destroy() {
+        if (ctx_tgt && threadpools.normal) {
+            llama_synchronize(ctx_tgt);
+            llama_detach_threadpool(ctx_tgt);
+        }
+
         spec.reset();
         spec_init.reset();
 
@@ -983,6 +1061,9 @@ private:
         model_dft = nullptr;
 
         llama_init.reset();
+
+        // detach clears the context pointers; destroying the context also clears backend references.
+        threadpools.reset();
 
         ctx_tgt = nullptr;
         model_tgt = nullptr;
@@ -995,6 +1076,7 @@ private:
         GGML_ASSERT(sleeping != new_state);
         if (new_state) {
             SRV_INF("%s", "server is entering sleeping state\n");
+            scx_clear_state();
             destroy();
         } else {
             SRV_INF("%s", "server is exiting sleeping state\n");
@@ -1040,6 +1122,19 @@ private:
     // load the model and initialize llama_context
     // this may also be called to resume from sleeping state
     bool load_model(common_params & params) {
+        try {
+            if (load_model_impl(params)) {
+                return true;
+            }
+        } catch (...) {
+            destroy();
+            throw;
+        }
+        destroy();
+        return false;
+    }
+
+    bool load_model_impl(common_params & params) {
         load_progress_data load_progress_text  (this, "text_model");
         load_progress_data load_progress_mmproj(this, "mmproj_model");
         load_progress_data load_progress_spec  (this, "spec_model");
@@ -1055,6 +1150,13 @@ private:
                                         params_base.speculative.types.end(),
                                         COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end();
         const bool has_spec = has_draft || spec_mtp;
+
+        const bool scx_has_spec = std::any_of(params.speculative.types.begin(), params.speculative.types.end(),
+                [](common_speculative_type type) { return type != COMMON_SPECULATIVE_TYPE_NONE; });
+        if (params.scx_phase_run_id && (params.n_gpu_layers != 0 || has_mmproj || has_spec || scx_has_spec || params.embedding)) {
+            SRV_ERR("%s", "SCX phase tracing requires CPU-only text generation without speculative decoding\n");
+            return false;
+        }
 
         if (callback_state) {
             std::vector<std::string> stages = {"text_model"};
@@ -1197,6 +1299,22 @@ private:
         if (ctx_tgt == nullptr) {
             SRV_ERR("failed to create_context with model '%s'\n", params_base.model.path.c_str());
             return false;
+        }
+
+        if (params.scx_phase_run_id && (llama_model_has_encoder(model_tgt) || !llama_model_has_decoder(model_tgt))) {
+            SRV_ERR("%s", "SCX phase tracing requires a decoder-only model\n");
+            return false;
+        }
+
+        const bool cpu_only = params_base.n_gpu_layers == 0 || !llama_supports_gpu_offload();
+        if (cpu_only && params_base.tensor_buft_overrides.empty() && !has_mmproj && !has_spec && !scx_has_spec && !params_base.embedding &&
+                !llama_model_has_encoder(model_tgt) && llama_model_has_decoder(model_tgt)) {
+            auto * cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+            auto * reg = cpu_dev ? ggml_backend_dev_backend_reg(cpu_dev) : nullptr;
+            if (!threadpools.init(reg, params_base.cpuparams, params_base.cpuparams_batch)) {
+                return false;
+            }
+            llama_attach_threadpool(ctx_tgt, threadpools.normal, threadpools.batch);
         }
 
         vocab = llama_model_get_vocab(model_tgt);
@@ -2779,6 +2897,9 @@ private:
 #endif
 
     void update_slots() {
+#ifdef LLAMA_SCX_PHASE_TRACE
+        server_scx_reconcile_scope scx_guard([this]() { scx_reconcile_idle(); }, [this]() { scx_clear_state(); });
+#endif
 #ifdef DEBUG_TIMINGS
         static int64_t t_prev = 0;
         int64_t t_start = ggml_time_us();
@@ -2849,6 +2970,7 @@ private:
         llama_batch batch_view;
         int32_t off_next = 0;
         int32_t n_batch = llama_n_batch(ctx_tgt);
+        int32_t retry = 0;
         for (int32_t off = 0; off < batch.size(); off = off_next) {
             const int32_t n_tokens = std::min(n_batch, batch.size() - off);
             try {
@@ -2856,7 +2978,7 @@ private:
                 // TODO @ngxson : maybe handle n_batch == 1 here instead of inside decode()
 
                 batch_view = batch.get_view(off, n_tokens);
-                bool ok = decode(n_batch, off, batch_view);
+                bool ok = decode(n_batch, off, retry, batch_view);
 #ifdef DEBUG_TIMINGS
                 llama_synchronize(ctx_tgt);
 #endif
@@ -2867,8 +2989,10 @@ private:
 
                     // on successful decode, restore the original batch size
                     n_batch = llama_n_batch(ctx_tgt);
+                    retry = 0;
                 } else {
                     // try again with the updated n_batch
+                    retry++;
                     continue;
                 }
             } catch (const std::exception & e) {
@@ -3507,9 +3631,11 @@ private:
                         // MTP also wants logits at every prompt position so the
                         // streaming hook can mirror t_h_nextn into ctx_dft.
                         add_ok &= batch.add(slot.id,
+                            slot.task->id,
                             cur_tok,
                             slot.prompt.tokens.pos_next(),
-                            slot.need_embd());
+                            slot.need_embd(),
+                            SERVER_BATCH_PHASE_PREFILL);
                         slot.prompt.tokens.push_back(cur_tok);
 
                         slot.n_prompt_tokens_processed++;
@@ -3612,7 +3738,7 @@ private:
 
     // returns true = success ; false = retry with smaller batch size
     // throw std::runtime_error on fatal error
-    bool decode(int32_t & n_batch, int32_t off, llama_batch & batch_view) {
+    bool decode(int32_t & n_batch, int32_t off, int32_t retry, llama_batch & batch_view) {
         SRV_DBG("n_batch (effective) = %d, off = %d\n", n_batch, off);
 
         if (batch.size() == 0) {
@@ -3636,7 +3762,100 @@ private:
             }
         }
 
-        const int ret = llama_decode(ctx_tgt, batch_view);
+        const auto profile_mode = params_base.server_compute_profile_mode;
+        const bool trace_profile = params_base.server_compute_profile_trace;
+        const bool classify_phase = trace_profile || params_base.scx_phase_run_id || profile_mode == COMMON_SERVER_COMPUTE_PROFILE_MODE_PHASE;
+
+        int32_t n_prefill = 0;
+        int32_t n_decode  = 0;
+        int32_t n_unknown = classify_phase ? 0 : batch_view.n_tokens;
+        std::set<int> slot_ids;
+        std::set<int> task_ids;
+        if (classify_phase) {
+            for (int32_t i = off; i < off + batch_view.n_tokens; ++i) {
+                const auto & token = batch.tokens[i];
+                if (trace_profile) {
+                    slot_ids.insert(token.id_slot);
+                    task_ids.insert(token.id_task);
+                }
+                switch (token.phase) {
+                    case SERVER_BATCH_PHASE_PREFILL: n_prefill++; break;
+                    case SERVER_BATCH_PHASE_DECODE:  n_decode++;  break;
+                    case SERVER_BATCH_PHASE_UNKNOWN: n_unknown++; break;
+                    case SERVER_BATCH_PHASE_MIXED:   GGML_ABORT("MIXED is not a token source");
+                }
+            }
+        }
+
+        const auto phase = server_batch_phase(server_scx_classify_phase(n_prefill, n_decode, n_unknown));
+
+        llama_compute_profile requested_profile = LLAMA_COMPUTE_PROFILE_AUTO;
+        const bool use_options = profile_mode != COMMON_SERVER_COMPUTE_PROFILE_MODE_LEGACY;
+        if (profile_mode == COMMON_SERVER_COMPUTE_PROFILE_MODE_PHASE) {
+            if (phase == SERVER_BATCH_PHASE_PREFILL) {
+                requested_profile = LLAMA_COMPUTE_PROFILE_BATCH;
+            } else if (phase == SERVER_BATCH_PHASE_DECODE) {
+                requested_profile = LLAMA_COMPUTE_PROFILE_GENERATION;
+            }
+        }
+
+        const uint64_t call_id = ++compute_profile_call_id;
+        const int64_t t_start_us = ggml_time_us();
+
+        auto format_ids = [](const std::set<int> & ids) {
+            std::ostringstream ss;
+            const char * separator = "";
+            for (int id : ids) {
+                ss << separator << id;
+                separator = ",";
+            }
+            return ss.str();
+        };
+
+        if (trace_profile) {
+            const std::string slots_text = format_ids(slot_ids);
+            const std::string tasks_text = format_ids(task_ids);
+            SRV_INF("compute_profile_trace start: run=%" PRId64 " call=%" PRIu64 " retry=%d off=%d n_tokens=%d n_prefill=%d n_decode=%d n_unknown=%d phase=%s mode=%s requested_profile=%s slots=%s tasks=%s t_start_us=%" PRId64 "\n",
+                    compute_profile_run_id, call_id, retry, off, batch_view.n_tokens, n_prefill, n_decode, n_unknown,
+                    server_batch_phase_name(phase), server_compute_profile_mode_name(profile_mode),
+                    use_options ? server_compute_profile_name(requested_profile) : "LEGACY", slots_text.c_str(), tasks_text.c_str(), t_start_us);
+        }
+
+#ifdef LLAMA_SCX_PHASE_TRACE
+        std::optional<server_scx_scope> scx_scope;
+        if (params_base.scx_phase_mode == "trace") {
+            scx_scope.emplace(ctx_tgt, server_scx_event { 1, params_base.scx_phase_run_id, call_id, uint64_t(retry),
+                    uint64_t(phase), uint64_t(requested_profile), uint64_t(n_prefill), uint64_t(n_decode), uint64_t(n_unknown), -1 });
+        }
+        server_scx_state_sync scx_sync(ctx_tgt, params_base.scx_phase_mode == "state");
+        if (params_base.scx_phase_mode == "state") {
+            scx_state.publish(params_base.scx_phase_run_id, uint32_t(phase), true, llama_scx_phase_set_v2);
+        }
+#endif
+        int ret;
+        if (use_options) {
+            auto options = llama_decode_default_options();
+            options.compute_profile = requested_profile;
+            ret = llama_decode_with_options(ctx_tgt, batch_view, options);
+        } else {
+            ret = llama_decode(ctx_tgt, batch_view);
+        }
+
+        const int64_t t_return_us = ggml_time_us();
+#ifdef LLAMA_SCX_PHASE_TRACE
+        if (scx_scope) { scx_scope->finish(ret); }
+        scx_sync.finish();
+#endif
+        int64_t t_complete_us = t_return_us;
+        if (trace_profile && ret == 0) {
+            llama_synchronize(ctx_tgt);
+            t_complete_us = ggml_time_us();
+        }
+
+        if (trace_profile) {
+            SRV_INF("compute_profile_trace end: run=%" PRId64 " call=%" PRIu64 " retry=%d ret=%d t_return_us=%" PRId64 " t_complete_us=%" PRId64 " return_elapsed_us=%" PRId64 " complete_elapsed_us=%" PRId64 "\n",
+                    compute_profile_run_id, call_id, retry, ret, t_return_us, t_complete_us, t_return_us - t_start_us, t_complete_us - t_start_us);
+        }
 
         metrics.on_decoded(slots);
 
@@ -3990,7 +4209,13 @@ bool server_context::load_model(common_params & params) {
 
 void server_context::start_loop() {
     auto & params = impl->params_base;
-    impl->queue_tasks.start_loop(params.sleep_idle_seconds * 1000);
+    try {
+        impl->queue_tasks.start_loop(params.sleep_idle_seconds * 1000);
+    } catch (...) {
+        impl->scx_clear_state();
+        throw;
+    }
+    impl->scx_clear_state();
 }
 
 void server_context::terminate() {

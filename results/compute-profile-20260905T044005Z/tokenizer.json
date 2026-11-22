@@ -1,0 +1,116 @@
+{
+  "legacy-t2-tb6": {
+    "tokenizer_text": " fixed benchmark token sequence",
+    "tokens_without_special": [
+      8356,
+      28431,
+      3950,
+      8500
+    ],
+    "tokens_with_special": [
+      151646,
+      8356,
+      28431,
+      3950,
+      8500
+    ],
+    "special_prefix": [
+      151646
+    ]
+  },
+  "auto-t2-tb6": {
+    "tokenizer_text": " fixed benchmark token sequence",
+    "tokens_without_special": [
+      8356,
+      28431,
+      3950,
+      8500
+    ],
+    "tokens_with_special": [
+      151646,
+      8356,
+      28431,
+      3950,
+      8500
+    ],
+    "special_prefix": [
+      151646
+    ]
+  },
+  "phase-t2-tb6": {
+    "tokenizer_text": " fixed benchmark token sequence",
+    "tokens_without_special": [
+      8356,
+      28431,
+      3950,
+      8500
+    ],
+    "tokens_with_special": [
+      151646,
+      8356,
+      28431,
+      3950,
+      8500
+    ],
+    "special_prefix": [
+      151646
+    ]
+  },
+  "legacy-t6-tb6": {
+    "tokenizer_text": " fixed benchmark token sequence",
+    "tokens_without_special": [
+      8356,
+      28431,
+      3950,
+      8500
+    ],
+    "tokens_with_special": [
+      151646,
+      8356,
+      28431,
+      3950,
+      8500
+    ],
+    "special_prefix": [
+      151646
+    ]
+  },
+  "auto-t6-tb6": {
+    "tokenizer_text": " fixed benchmark token sequence",
+    "tokens_without_special": [
+      8356,
+      28431,
+      3950,
+      8500
+    ],
+    "tokens_with_special": [
+      151646,
+      8356,
+      28431,
+      3950,
+      8500
+    ],
+    "special_prefix": [
+      151646
+    ]
+  },
+  "phase-t6-tb6": {
+    "tokenizer_text": " fixed benchmark token sequence",
+    "tokens_without_special": [
+      8356,
+      28431,
+      3950,
+      8500
+    ],
+    "tokens_with_special": [
+      151646,
+      8356,
+      28431,
+      3950,
+      8500
+    ],
+    "special_prefix": [
+      151646
+    ]
+  }
+}

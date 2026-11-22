@@ -7,6 +7,7 @@
 #include <vector>
 #include <sstream>
 #include <unordered_set>
+#include <utility>
 
 #undef NDEBUG
 #include <cassert>
@@ -85,6 +86,30 @@ static void test(void) {
 
     std::vector<std::string> argv;
 
+    auto check_scx = [&](std::vector<std::string> args, bool expected, const std::string & mode = "off") {
+        common_params parsed;
+        auto pointers = list_str_to_char(args);
+        assert(common_params_parse(pointers.size(), pointers.data(), parsed, LLAMA_EXAMPLE_SERVER) == expected);
+        if (expected) { assert(parsed.scx_phase_mode == mode); }
+    };
+    check_scx({"test", "--scx-phase-mode", "off"}, true);
+    check_scx({"test", "--scx-phase-mode", "bad"}, false);
+    for (const std::string mode : {"off", "trace", "state"}) {
+        check_scx({"test", "--scx-phase-mode", mode}, mode == "off");
+#ifdef LLAMA_SCX_PHASE_TRACE
+        const bool enabled = mode != "off";
+#else
+        const bool enabled = false;
+#endif
+        check_scx({"test", "--scx-phase-mode", mode, "--scx-phase-run-id", "7"}, enabled, mode);
+        check_scx({"test", "--scx-phase-run-id", "7", "--scx-phase-mode", mode}, enabled, mode);
+    }
+#ifdef LLAMA_SCX_PHASE_TRACE
+    check_scx({"test", "--scx-phase-run-id", "7"}, true, "trace");
+#else
+    check_scx({"test", "--scx-phase-run-id", "7"}, false);
+#endif
+
     printf("test-arg-parser: test invalid usage\n\n");
 
     // missing value
@@ -150,6 +175,96 @@ static void test(void) {
     argv = {"binary_name", "-lm", "dio"};
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
     assert(params.load_mode == LLAMA_LOAD_MODE_DIRECT_IO);
+
+    printf("test-arg-parser: test batched-bench compute profiles\n\n");
+
+    {
+        common_params bench_params;
+        argv = {"binary_name", "-m", "model.gguf"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), bench_params, LLAMA_EXAMPLE_BENCH));
+        assert(bench_params.batched_bench_pp_compute_profile == LLAMA_COMPUTE_PROFILE_AUTO);
+        assert(bench_params.batched_bench_tg_compute_profile == LLAMA_COMPUTE_PROFILE_AUTO);
+    }
+
+    {
+        common_params bench_params;
+        argv = {"binary_name", "-m", "model.gguf", "--pp-compute-profile", "batch", "--tg-compute-profile", "generation"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), bench_params, LLAMA_EXAMPLE_BENCH));
+        assert(bench_params.batched_bench_pp_compute_profile == LLAMA_COMPUTE_PROFILE_BATCH);
+        assert(bench_params.batched_bench_tg_compute_profile == LLAMA_COMPUTE_PROFILE_GENERATION);
+    }
+
+    {
+        common_params bench_params;
+        argv = {"binary_name", "-m", "model.gguf", "--pp-compute-profile", "generation", "--tg-compute-profile", "batch"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), bench_params, LLAMA_EXAMPLE_BENCH));
+        assert(bench_params.batched_bench_pp_compute_profile == LLAMA_COMPUTE_PROFILE_GENERATION);
+        assert(bench_params.batched_bench_tg_compute_profile == LLAMA_COMPUTE_PROFILE_BATCH);
+    }
+
+    {
+        common_params bench_params;
+        argv = {"binary_name", "-m", "model.gguf", "--pp-compute-profile", "auto", "--tg-compute-profile", "auto"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), bench_params, LLAMA_EXAMPLE_BENCH));
+        assert(bench_params.batched_bench_pp_compute_profile == LLAMA_COMPUTE_PROFILE_AUTO);
+        assert(bench_params.batched_bench_tg_compute_profile == LLAMA_COMPUTE_PROFILE_AUTO);
+    }
+
+    {
+        common_params bench_params;
+        argv = {"binary_name", "-m", "model.gguf", "--pp-compute-profile", "decode"};
+        assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), bench_params, LLAMA_EXAMPLE_BENCH));
+    }
+
+    {
+        common_params bench_params;
+        argv = {"binary_name", "-m", "model.gguf", "--tg-compute-profile", "prefill"};
+        assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), bench_params, LLAMA_EXAMPLE_BENCH));
+    }
+
+    printf("test-arg-parser: test server compute profile modes\n\n");
+
+    {
+        common_params server_params;
+        argv = {"binary_name", "-m", "model.gguf"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), server_params, LLAMA_EXAMPLE_SERVER));
+        assert(server_params.server_compute_profile_mode == COMMON_SERVER_COMPUTE_PROFILE_MODE_LEGACY);
+        assert(!server_params.server_compute_profile_trace);
+    }
+
+    for (const auto & profile_mode : {
+            std::make_pair("legacy", COMMON_SERVER_COMPUTE_PROFILE_MODE_LEGACY),
+            std::make_pair("auto",   COMMON_SERVER_COMPUTE_PROFILE_MODE_AUTO),
+            std::make_pair("phase",  COMMON_SERVER_COMPUTE_PROFILE_MODE_PHASE),
+        }) {
+        common_params server_params;
+        argv = {"binary_name", "-m", "model.gguf", "--server-compute-profile-mode", profile_mode.first, "--server-compute-profile-trace"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), server_params, LLAMA_EXAMPLE_SERVER));
+        assert(server_params.server_compute_profile_mode == profile_mode.second);
+        assert(server_params.server_compute_profile_trace);
+    }
+
+    {
+        common_params server_params;
+        argv = {"binary_name", "-m", "model.gguf", "--server-compute-profile-mode", "invalid"};
+        assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), server_params, LLAMA_EXAMPLE_SERVER));
+    }
+
+    for (const std::string value : {"0", "-1", "+1", "1x", "18446744073709551616"}) {
+        common_params server_params;
+        argv = {"binary_name", "-m", "model.gguf", "--scx-phase-run-id", value};
+        assert(!common_params_parse(argv.size(), list_str_to_char(argv).data(), server_params, LLAMA_EXAMPLE_SERVER));
+    }
+    {
+        common_params server_params;
+        argv = {"binary_name", "-m", "model.gguf", "--scx-phase-run-id", "18446744073709551615"};
+#ifdef LLAMA_SCX_PHASE_TRACE
+        assert(common_params_parse(argv.size(), list_str_to_char(argv).data(), server_params, LLAMA_EXAMPLE_SERVER));
+        assert(server_params.scx_phase_run_id == UINT64_MAX);
+#else
+        assert(!common_params_parse(argv.size(), list_str_to_char(argv).data(), server_params, LLAMA_EXAMPLE_SERVER));
+#endif
+    }
 
     // multi-value args (CSV)
     argv = {"binary_name", "--lora", "file1.gguf,\"file2,2.gguf\",\"file3\"\"3\"\".gguf\",file4\".gguf"};

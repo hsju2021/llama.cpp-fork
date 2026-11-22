@@ -338,6 +338,34 @@ static bool parse_bool_value(const std::string & value) {
     }
 }
 
+static llama_compute_profile parse_compute_profile(const std::string & value) {
+    if (value == "auto") {
+        return LLAMA_COMPUTE_PROFILE_AUTO;
+    }
+    if (value == "generation") {
+        return LLAMA_COMPUTE_PROFILE_GENERATION;
+    }
+    if (value == "batch") {
+        return LLAMA_COMPUTE_PROFILE_BATCH;
+    }
+
+    throw std::invalid_argument("expected one of: auto, generation, batch");
+}
+
+static common_server_compute_profile_mode parse_server_compute_profile_mode(const std::string & value) {
+    if (value == "legacy") {
+        return COMMON_SERVER_COMPUTE_PROFILE_MODE_LEGACY;
+    }
+    if (value == "auto") {
+        return COMMON_SERVER_COMPUTE_PROFILE_MODE_AUTO;
+    }
+    if (value == "phase") {
+        return COMMON_SERVER_COMPUTE_PROFILE_MODE_PHASE;
+    }
+
+    throw std::invalid_argument("expected one of: legacy, auto, phase");
+}
+
 [[noreturn]] static void arg_removed(const std::string & msg) {
     throw std::invalid_argument("the argument has been removed. " + msg);
 }
@@ -813,6 +841,18 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
 
     // parse all CLI args now, so that -hf is available below for remote preset resolution
     parse_cli_args();
+
+    if (!params.scx_phase_mode_explicit) {
+        params.scx_phase_mode = params.scx_phase_run_id ? "trace" : "off";
+    }
+    if ((params.scx_phase_mode == "off") != (params.scx_phase_run_id == 0)) {
+        throw std::invalid_argument("SCX trace/state requires a nonzero run ID; off forbids a run ID");
+    }
+#ifndef LLAMA_SCX_PHASE_TRACE
+    if (params.scx_phase_mode != "off") {
+        throw std::invalid_argument("rebuild on Linux with LLAMA_SCX_PHASE_TRACE=ON");
+    }
+#endif
 
     postprocess_cpu_params(params.cpuparams,       nullptr);
     postprocess_cpu_params(params.cpuparams_batch, &params.cpuparams);
@@ -3134,6 +3174,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_BENCH, LLAMA_EXAMPLE_PARALLEL}));
     add_opt(common_arg(
+        {"--pp-compute-profile"}, "{auto,generation,batch}",
+        "compute profile used for measured prompt processing (default: auto)",
+        [](common_params & params, const std::string & value) {
+            params.batched_bench_pp_compute_profile = parse_compute_profile(value);
+        }
+    ).set_examples({LLAMA_EXAMPLE_BENCH}));
+    add_opt(common_arg(
+        {"--tg-compute-profile"}, "{auto,generation,batch}",
+        "compute profile used for measured text generation (default: auto)",
+        [](common_params & params, const std::string & value) {
+            params.batched_bench_tg_compute_profile = parse_compute_profile(value);
+        }
+    ).set_examples({LLAMA_EXAMPLE_BENCH}));
+    add_opt(common_arg(
         {"-npp"}, "n0,n1,...",
         "number of prompt tokens",
         [](common_params & params, const std::string & value) {
@@ -3421,6 +3475,50 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.n_threads_http = value;
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_THREADS_HTTP"));
+    add_opt(common_arg(
+        {"--scx-phase-mode"}, "MODE",
+        "select sched_ext mode: off, trace, or state (default: off; run ID alone selects trace)",
+        [](common_params & params, const std::string & value) {
+            if (value != "off" && value != "trace" && value != "state") {
+                throw std::invalid_argument("SCX mode must be off, trace, or state");
+            }
+            params.scx_phase_mode = value;
+            params.scx_phase_mode_explicit = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--scx-phase-run-id"}, "UINT64",
+        "enable experimental sched_ext phase markers for a nonzero decimal run ID (Linux trace build only)",
+        [](common_params & params, const std::string & value) {
+#ifdef LLAMA_SCX_PHASE_TRACE
+            if (value.empty() || value.find_first_not_of("0123456789") != std::string::npos) {
+                throw std::invalid_argument("SCX run ID must be a nonzero decimal uint64");
+            }
+            params.scx_phase_run_id = std::stoull(value);
+            if (params.scx_phase_run_id == 0) {
+                throw std::invalid_argument("SCX run ID must be nonzero");
+            }
+#else
+            (void) params;
+            (void) value;
+            throw std::invalid_argument("rebuild on Linux with LLAMA_SCX_PHASE_TRACE=ON");
+#endif
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--server-compute-profile-mode"}, "MODE",
+        "select server decode API/profile mode: legacy, auto, or phase (default: legacy)",
+        [](common_params & params, const std::string & value) {
+            params.server_compute_profile_mode = parse_server_compute_profile_mode(value);
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SERVER_COMPUTE_PROFILE_MODE"));
+    add_opt(common_arg(
+        {"--server-compute-profile-trace"},
+        "log semantic batch phases and synchronize traced decode calls (default: disabled)",
+        [](common_params & params) {
+            params.server_compute_profile_trace = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SERVER_COMPUTE_PROFILE_TRACE"));
     add_opt(common_arg(
         {"--cache-prompt"},
         {"--no-cache-prompt"},

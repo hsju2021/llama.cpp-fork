@@ -2,6 +2,8 @@
 
 Benchmark is using [k6](https://k6.io/).
 
+For CPU thread/profile comparisons with raw streaming timestamps, mixed-workload overlap checks, process CPU accounting, and model-free fixtures, see the [CPU serving benchmark](cpu/README.md).
+
 ##### Install k6 and sse extension
 
 SSE is not supported by default in k6, you have to build k6 with the [xk6-sse](https://github.com/phymbert/xk6-sse) extension.

@@ -1,0 +1,14 @@
+{
+  "legacy_auto_s1_t2": {
+    "tokens_equal": true,
+    "stop_type_equal": true,
+    "legacy_stop_type": "limit",
+    "auto_stop_type": "limit"
+  },
+  "legacy_auto_s1_t6": {
+    "tokens_equal": true,
+    "stop_type_equal": true,
+    "legacy_stop_type": "limit",
+    "auto_stop_type": "limit"
+  }
+}
