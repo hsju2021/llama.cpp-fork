@@ -3057,25 +3057,7 @@ static int ggml_cpu_try_fuse_ops(
     return 0;
 }
 
-#ifdef LLAMA_SCX_PHASE_TRACE
-void ggml_scx_worker_begin_v1(void);
-void ggml_scx_worker_end_v1(void);
-
-__attribute__((noinline, used, visibility("default")))
-void ggml_scx_worker_begin_v1(void) {
-    __asm__ __volatile__("nop" : : : "memory");
-}
-
-__attribute__((noinline, used, visibility("default")))
-void ggml_scx_worker_end_v1(void) {
-    __asm__ __volatile__("nop; nop" : : : "memory");
-}
-#endif
-
 static thread_ret_t ggml_graph_compute_thread(void * data) {
-#ifdef LLAMA_SCX_PHASE_TRACE
-    ggml_scx_worker_begin_v1();
-#endif
     struct ggml_compute_state * state = (struct ggml_compute_state *) data;
     struct ggml_threadpool    * tp    = state->threadpool;
 
@@ -3141,10 +3123,6 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
     GGML_PRINT_DEBUG("thread #%d compute-done cplan %p last-graph %d\n", state->ith, (const void *)cplan, state->last_graph);
 #endif
 
-#ifdef LLAMA_SCX_PHASE_TRACE
-    // Clear worker state before the final barrier releases the caller.
-    ggml_scx_worker_end_v1();
-#endif
     ggml_barrier(state->threadpool);
 
 #ifdef GGML_USE_CPU_RISCV64_SPACEMIT

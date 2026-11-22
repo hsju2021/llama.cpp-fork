@@ -86,6 +86,30 @@ static void test(void) {
 
     std::vector<std::string> argv;
 
+    auto check_scx = [&](std::vector<std::string> args, bool expected, const std::string & mode = "off") {
+        common_params parsed;
+        auto pointers = list_str_to_char(args);
+        assert(common_params_parse(pointers.size(), pointers.data(), parsed, LLAMA_EXAMPLE_SERVER) == expected);
+        if (expected) { assert(parsed.scx_phase_mode == mode); }
+    };
+    check_scx({"test", "--scx-phase-mode", "off"}, true);
+    check_scx({"test", "--scx-phase-mode", "bad"}, false);
+    for (const std::string mode : {"off", "trace", "state"}) {
+        check_scx({"test", "--scx-phase-mode", mode}, mode == "off");
+#ifdef LLAMA_SCX_PHASE_TRACE
+        const bool enabled = mode != "off";
+#else
+        const bool enabled = false;
+#endif
+        check_scx({"test", "--scx-phase-mode", mode, "--scx-phase-run-id", "7"}, enabled, mode);
+        check_scx({"test", "--scx-phase-run-id", "7", "--scx-phase-mode", mode}, enabled, mode);
+    }
+#ifdef LLAMA_SCX_PHASE_TRACE
+    check_scx({"test", "--scx-phase-run-id", "7"}, true, "trace");
+#else
+    check_scx({"test", "--scx-phase-run-id", "7"}, false);
+#endif
+
     printf("test-arg-parser: test invalid usage\n\n");
 
     // missing value
