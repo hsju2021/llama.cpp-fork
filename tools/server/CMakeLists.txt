@@ -15,6 +15,8 @@ add_library(${TARGET} STATIC
     server-common.h
     server-context.cpp
     server-context.h
+    server-scx.cpp
+    server-scx.h
     server-threadpool.h
     server-stream.cpp
     server-stream.h
