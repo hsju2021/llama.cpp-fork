@@ -996,14 +996,14 @@ extern "C" {
     //    0 - success
     //    1 - could not find a KV slot for the batch (try reducing the size of the batch or increase the context)
     //    2 - aborted     (processed ubatches will remain in the context's memory)
-    //   -1 - invalid input batch
+    //   -1 - invalid input batch or ctx is NULL
     // < -1 - fatal error (processed ubatches will remain in the context's memory)
     LLAMA_API int32_t llama_decode(
             struct llama_context * ctx,
               struct llama_batch   batch);
 
     // Same as llama_decode(), but accepts options that apply to every physical ubatch in this call.
-    // Returns -1 if options.compute_profile is invalid.
+    // Returns -1 if ctx is NULL or options.compute_profile is invalid.
     LLAMA_API int32_t llama_decode_with_options(
             struct llama_context * ctx,
               struct llama_batch   batch,

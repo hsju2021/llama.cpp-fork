@@ -4141,6 +4141,11 @@ int32_t llama_decode_with_options(
         return -1;
     }
 
+    if (ctx == nullptr) {
+        LLAMA_LOG_ERROR("%s: ctx is NULL\n", __func__);
+        return -1;
+    }
+
     const int ret = ctx->decode(batch, options.compute_profile);
     if (ret != 0 && ret != 1) {
         LLAMA_LOG_ERROR("%s: failed to decode, ret = %d\n", __func__, ret);
