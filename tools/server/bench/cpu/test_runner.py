@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 import runner
 import overhead
+import check_threadpools
 
 
 FIXTURE = Path(__file__).with_name("fixture_server.py")
@@ -185,6 +186,75 @@ class RunnerTests(unittest.TestCase):
         path.write_text(json.dumps(config))
         with self.assertRaises(ValueError):
             runner.load_config(path)
+
+    def test_cpu_pool_controls(self):
+        config = self.config()
+        condition = config["conditions"][0]
+        condition.update(poll=0, poll_batch=1, cpu_mask="0x3", cpu_mask_batch="C",
+                         cpu_strict=1, cpu_strict_batch=0, priority=0, priority_batch=0)
+        path = self.directory / "config.json"
+        path.write_text(json.dumps(config))
+        loaded = runner.load_config(path)
+        command = runner.server_command(loaded, loaded["conditions"][0], 1234)
+        for key, flag in runner.CPU_FLAGS.items():
+            self.assertEqual(command[command.index(flag) + 1], str(condition[key]))
+        for key, value in (("cpu_mask", "--bad"), ("cpu_mask", "0X3"), ("cpu_mask", "f" * 129), ("cpu_mask_batch", ""), ("cpu_strict", 2),
+                           ("cpu_strict_batch", True), ("priority", -2), ("priority_batch", -1)):
+            with self.subTest(key=key):
+                bad = json.loads(path.read_text())
+                bad["conditions"][0][key] = value
+                invalid = self.directory / "invalid.json"
+                invalid.write_text(json.dumps(bad))
+                with self.assertRaises(ValueError):
+                    runner.load_config(invalid)
+
+    def test_threadpool_diagnostics_exclude_startup_and_require_evidence(self):
+        path = self.directory / "server.log"
+        startup = b"startup: disposable_threadpool=yes\n"
+        path.write_bytes(startup + b"decode: disposable_threadpool=no\n")
+        self.assertEqual(check_threadpools.pool_diagnostics(path, len(startup), "no"), ["no"])
+        with self.assertRaises(RuntimeError):
+            check_threadpools.pool_diagnostics(path, 0, "no")
+        with self.assertRaises(RuntimeError):
+            check_threadpools.pool_diagnostics(path, path.stat().st_size, "no")
+        with self.assertRaises(RuntimeError):
+            check_threadpools.pool_diagnostics(path, len(startup), "yes")
+        snapshot = check_threadpools.task_snapshot(os.getpid())
+        task = next(task for task in snapshot["tasks"] if task["tid"] == threading.get_native_id())
+        self.assertEqual(task["allowed_cpus"], sorted(os.sched_getaffinity(0)))
+        self.assertGreater(task["start_ticks"], 0)
+
+    def test_threadpool_diagnostic_failure_still_stops_server(self):
+        output = self.directory / "diagnostics"
+        stopped = []
+
+        class FakeServer:
+            def __init__(self, command, port, log_path, *args):
+                self.log_path = log_path
+                self.process = type("Process", (), {"pid": os.getpid()})()
+                self.cleanup = None
+
+            def start(self, *args):
+                self.log_path.write_text("startup\n")
+
+            def stop(self):
+                stopped.append(True)
+                self.cleanup = {"forced_leader_kill": False, "returncode": 0, "leader_reaped": True}
+
+        args = ["check_threadpools.py", "--config", "unused.json", "--run", "--output", str(output)]
+        with contextlib.ExitStack() as stack:
+            for target, value in (("load_config", self.config()), ("existing_servers", []),
+                                  ("manifest", {}), ("process_environment", {}), ("loaded_libraries", []),
+                                  ("json_request", {}), ("make_prompts", {}), ("workload", {"status": "failed"})):
+                stack.enter_context(patch.object(runner, target, return_value=value))
+            stack.enter_context(patch.object(runner, "Server", FakeServer))
+            stack.enter_context(patch.object(sys, "argv", args))
+            stack.enter_context(patch.object(check_threadpools.signal, "signal"))
+            self.assertEqual(check_threadpools.main(), 1)
+        report = json.loads((output / "report.json").read_text())
+        self.assertEqual(report["status"], "failed")
+        self.assertTrue(report["cleanup"]["leader_reaped"])
+        self.assertEqual(stopped, [True])
 
     def test_campaign_warmup_failure_and_partial_status(self):
         config = self.config()

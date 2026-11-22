@@ -26,6 +26,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
 WORKLOADS = ("pp", "d1", "d2", "d4", "m1", "m3")
+CPU_FLAGS = {
+    "poll": "--poll", "poll_batch": "--poll-batch",
+    "cpu_mask": "--cpu-mask", "cpu_mask_batch": "--cpu-mask-batch",
+    "cpu_strict": "--cpu-strict", "cpu_strict_batch": "--cpu-strict-batch",
+    "priority": "--prio", "priority_batch": "--prio-batch",
+}
 DEFAULTS = {
     "seed": 20260905, "request_seed": 424242, "repetitions": 3, "warmups": 1,
     "prompt_tokens": 128, "output_tokens": 128, "long_prompt_tokens": 2048,
@@ -184,7 +190,7 @@ def load_config(path):
     if config["ctx_size"] // config["slots"] < max(config["prompt_tokens"] + config["output_tokens"], config["long_prompt_tokens"] + config["long_output_tokens"]):
         raise ValueError("context per slot cannot hold the configured requests")
     for condition in config["conditions"]:
-        if set(condition) - {"threads", "batch_threads", "profile", "poll", "poll_batch"}:
+        if set(condition) - ({"threads", "batch_threads", "profile"} | set(CPU_FLAGS)):
             raise ValueError("unsupported condition option")
         if condition.get("profile") not in ("legacy", "auto", "phase"):
             raise ValueError("invalid profile")
@@ -193,6 +199,13 @@ def load_config(path):
                 raise ValueError(f"invalid {key}")
         for key in ("poll", "poll_batch"):
             if key in condition and (type(condition[key]) is not int or not 0 <= condition[key] <= (100 if key == "poll" else 1)):
+                raise ValueError(f"invalid {key}")
+        for key in ("cpu_mask", "cpu_mask_batch"):
+            if key in condition and (not isinstance(condition[key], str) or not re.fullmatch(r"(?:0x)?[0-9a-fA-F]{1,128}", condition[key])):
+                raise ValueError(f"invalid {key}")
+        for key in ("cpu_strict", "cpu_strict_batch", "priority", "priority_batch"):
+            lower, upper = (0, 1) if key.startswith("cpu_strict") else (-1 if key == "priority" else 0, 3)
+            if key in condition and (type(condition[key]) is not int or not lower <= condition[key] <= upper):
                 raise ValueError(f"invalid {key}")
     for key, value in config["server_env"].items():
         if not key.startswith(("OMP_", "GOMP_", "KMP_", "OPENBLAS_")) or not isinstance(value, str):
@@ -216,7 +229,7 @@ def server_command(config, condition, port):
                "--server-compute-profile-mode", condition["profile"], "--ctx-size", str(config["ctx_size"]),
                "--batch-size", str(config["batch_size"]), "--ubatch-size", str(config["ubatch_size"]),
                "--parallel", str(config["slots"]), "--cont-batching", "--slots", "--no-context-shift", "--no-ui", "--offline"]
-    for key, flag in (("poll", "--poll"), ("poll_batch", "--poll-batch")):
+    for key, flag in CPU_FLAGS.items():
         if key in condition:
             command.extend([flag, str(condition[key])])
     return command

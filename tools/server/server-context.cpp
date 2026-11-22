@@ -7,6 +7,7 @@
 #include "server-queue.h"
 #include "server-schema.h"
 #include "server-stream.h"
+#include "server-threadpool.h"
 
 #include "build-info.h"
 #include "common.h"
@@ -965,11 +966,7 @@ public:
     }
 
     ~server_context_impl() {
-        if (!sleeping) {
-            // destroy() is already called when entering sleeping state
-            // we don't call it again here to avoid double free
-            destroy();
-        }
+        destroy();
     }
 
 private:
@@ -979,6 +976,7 @@ private:
     common_params params_base;
 
     // note: keep these alive - they determine the lifetime of the model, context, etc.
+    server_threadpools threadpools;
     common_init_result_ptr llama_init;
 
     llama_context * ctx_tgt = nullptr;
@@ -1051,6 +1049,11 @@ private:
     int64_t t_last_load_progress_ms = 0;
 
     void destroy() {
+        if (ctx_tgt && threadpools.normal) {
+            llama_synchronize(ctx_tgt);
+            llama_detach_threadpool(ctx_tgt);
+        }
+
         spec.reset();
         spec_init.reset();
 
@@ -1058,6 +1061,9 @@ private:
         model_dft = nullptr;
 
         llama_init.reset();
+
+        // detach clears the context pointers; destroying the context also clears backend references.
+        threadpools.reset();
 
         ctx_tgt = nullptr;
         model_tgt = nullptr;
@@ -1116,6 +1122,19 @@ private:
     // load the model and initialize llama_context
     // this may also be called to resume from sleeping state
     bool load_model(common_params & params) {
+        try {
+            if (load_model_impl(params)) {
+                return true;
+            }
+        } catch (...) {
+            destroy();
+            throw;
+        }
+        destroy();
+        return false;
+    }
+
+    bool load_model_impl(common_params & params) {
         load_progress_data load_progress_text  (this, "text_model");
         load_progress_data load_progress_mmproj(this, "mmproj_model");
         load_progress_data load_progress_spec  (this, "spec_model");
@@ -1285,6 +1304,17 @@ private:
         if (params.scx_phase_run_id && (llama_model_has_encoder(model_tgt) || !llama_model_has_decoder(model_tgt))) {
             SRV_ERR("%s", "SCX phase tracing requires a decoder-only model\n");
             return false;
+        }
+
+        const bool cpu_only = params_base.n_gpu_layers == 0 || !llama_supports_gpu_offload();
+        if (cpu_only && params_base.tensor_buft_overrides.empty() && !has_mmproj && !has_spec && !scx_has_spec && !params_base.embedding &&
+                !llama_model_has_encoder(model_tgt) && llama_model_has_decoder(model_tgt)) {
+            auto * cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+            auto * reg = cpu_dev ? ggml_backend_dev_backend_reg(cpu_dev) : nullptr;
+            if (!threadpools.init(reg, params_base.cpuparams, params_base.cpuparams_batch)) {
+                return false;
+            }
+            llama_attach_threadpool(ctx_tgt, threadpools.normal, threadpools.batch);
         }
 
         vocab = llama_model_get_vocab(model_tgt);
