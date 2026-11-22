@@ -39,7 +39,7 @@ Keep these responsibilities distinct:
 - `llama_decode_with_options()` applies an explicit profile to every physical ubatch in one call. It does not choose separate resources per token or sequence. `AUTO` retains the existing per-ubatch selection behavior.
 - Preserve the default `llama_decode()` path and server `legacy` mode unless the task explicitly changes them. Experimental routing and tracing should remain opt-in.
 - The server's `phase` mode maps Prefill to `BATCH`, Decode to `GENERATION`, and Mixed or Unknown work to `AUTO` for its supported decoder path.
-- Thread-count and threadpool selection do not reserve CPU cores, establish fixed worker identities, or provide independent concurrent Prefill/Decode execution.
+- Thread-count and threadpool selection do not reserve CPU cores or provide independent concurrent Prefill/Decode execution. For single-context CPU-only decoder text generation, `llama-server` attaches persistent normal/batch CPU threadpools within an awake interval; affinity and worker reuse remain subject to runtime and OS constraints.
 - `LLAMA_SCX_PHASE_TRACE` is a default-OFF Linux observation bridge. Its supported scope is a single CPU-only, decoder-only text-generation context with explicit `-ngl 0`, without GPU/BLAS, speculative decoding, multimodal, embedding, or router modes.
 - The phase markers are optional uprobe symbols, not a public libllama phase API. Preserve the versioned wire layout and marker symbols unless an integration change is explicitly in scope; coordinate provider and consumer changes.
 - Observation and phase delivery are not evidence that a phase-aware CPU allocation policy or a performance improvement exists.
@@ -70,10 +70,10 @@ Keep these responsibilities distinct:
 ## Starting points
 
 - [Project overview and quick start](README.md)
-- [Compute-profile API, server modes, and phase-marker contract](docs/development/compute-profile.md)
+- [Compute-profile API, server modes, and phase-marker contract](docs/development/compute-profile.md) and [SCX v2 status plan](docs/development/scx-state-mode-plan.md)
 - [Public API](include/llama.h) and [decode execution](src/llama-context.cpp)
-- [Server batch classification and routing](tools/server/server-context.cpp)
-- [Server marker ABI](tools/server/server-scx.h) and [CPU worker implementation](ggml/src/ggml-cpu/ggml-cpu.c)
-- [Batched benchmark](tools/batched-bench/README.md), [build guide](docs/build.md), and [server tests](tools/server/tests/README.md)
+- [Server batch classification and routing](tools/server/server-context.cpp) and [persistent CPU threadpools](tools/server/server-threadpool.h)
+- [Server marker ABI](tools/server/server-scx.h), [marker definitions](tools/server/server-scx.cpp), and [CPU graph execution](ggml/src/ggml-cpu/ggml-cpu.c)
+- [CPU serving benchmark harness](tools/server/bench/cpu/README.md), [batched benchmark](tools/batched-bench/README.md), [build guide](docs/build.md), and [server tests](tools/server/tests/README.md)
 - [Archived server experiment](results/compute-profile-20260905T044005Z/README.md)
 - [Repository skills](skills/) when a workflow matches the task; inherited upstream submission steps do not apply to local fork work.
