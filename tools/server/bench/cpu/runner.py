@@ -21,7 +21,7 @@ import subprocess
 import sys
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -82,28 +82,40 @@ def cpu_seconds(pid):
     return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
 
 
+def unescape_mountinfo_path(path):
+    return re.sub(r"\\(040|011|012|134)", lambda match: chr(int(match[1], 8)), path)
+
+
 def cgroups(pid):
     membership = Path(f"/proc/{pid}/cgroup").read_text()
     mounts = Path(f"/proc/{pid}/mountinfo").read_text()
     files = {}
     for line in mounts.splitlines():
         before, after = line.split(" - ", 1)
-        fs, _, options = after.split()[:3]
+        after_parts = after.split(" ", 2)
+        if len(after_parts) < 3:
+            continue
+        fs, _, options = after_parts
         if fs not in ("cgroup", "cgroup2"):
             continue
         parts = before.split()
-        mount_root, mount_path = parts[3:5]
+        mount_root, mount_path = map(unescape_mountinfo_path, parts[3:5])
+        root = PurePosixPath("/" + mount_root.lstrip("/"))
+        boundary = Path(mount_path)
         for member in membership.splitlines():
             _, controllers, member_path = member.split(":", 2)
             if fs == "cgroup" and not set(controllers.split(",")) & set(options.split(",")):
                 continue
             if fs == "cgroup2" and controllers:
                 continue
-            relative = os.path.relpath(member_path, mount_root)
-            if relative.startswith(".."):
-                relative = "."
-            directory = Path(mount_path) / relative
-            boundary = Path(mount_path)
+            try:
+                relative = PurePosixPath("/" + member_path.lstrip("/")).relative_to(root)
+            except ValueError:
+                continue
+            # A cgroup namespace can report membership outside its root.
+            if ".." in relative.parts:
+                continue
+            directory = boundary / relative
             while True:
                 for name in ("cpu.max", "cpu.stat", "cpuset.cpus.effective", "cpu.cfs_quota_us", "cpu.cfs_period_us", "cpuset.cpus"):
                     path = directory / name
@@ -616,13 +628,29 @@ def workload(server, config, name, prompts, directory, cancel):
     return result
 
 
+def mapped_library_name(path):
+    return Path(path.removesuffix(" (deleted)")).name
+
+
 def loaded_libraries(pid):
     paths = set()
     for line in Path(f"/proc/{pid}/maps").read_text().splitlines():
         fields = line.split(maxsplit=5)
-        if len(fields) == 6 and fields[5].startswith("/") and ".so" in fields[5]:
-            paths.add(fields[5])
-    return [identity(path) for path in sorted(paths)]
+        if len(fields) != 6:
+            continue
+        path = fields[5]
+        if path.startswith("/") and re.search(r"\.so(?:\.[0-9A-Za-z._-]+)?$", mapped_library_name(path)):
+            paths.add(path)
+    result = []
+    for path in sorted(paths):
+        if path.endswith(" (deleted)"):
+            result.append({"path": path, "deleted": True})
+            continue
+        try:
+            result.append({**identity(path), "path": path})
+        except OSError as exc:
+            result.append({"path": path, "unavailable": str(exc)})
+    return result
 
 
 def run_campaign(config, output, cancel):
@@ -655,10 +683,23 @@ def run_campaign(config, output, cancel):
                     row.update(status="starting", command=command)
                     write_json(output / "trials.json", rows)
                     server.start(config["ready_timeout_s"], cancel)
-                    write_json(directory / "server-environment.json", {
-                        **process_environment(server.process.pid), "libraries": loaded_libraries(server.process.pid),
-                        "props": json_request(port, "GET", "/props"), "server_env_overrides": config["server_env"],
-                    })
+                    libraries = loaded_libraries(server.process.pid)
+                    incomplete_libraries = [library for library in libraries if "sha256" not in library]
+                    required_prefixes = ("libllama", "libggml", "libgomp", "libomp", "libiomp5")
+                    missing_required_libraries = [
+                        library["path"] for library in incomplete_libraries
+                        if mapped_library_name(library["path"]).startswith(required_prefixes)
+                    ]
+                    server_environment = {
+                        **process_environment(server.process.pid), "libraries": libraries,
+                        "libraries_complete": not incomplete_libraries, "incomplete_libraries": incomplete_libraries,
+                        "server_env_overrides": config["server_env"],
+                    }
+                    if not missing_required_libraries:
+                        server_environment["props"] = json_request(port, "GET", "/props")
+                    write_json(directory / "server-environment.json", server_environment)
+                    if missing_required_libraries:
+                        raise RuntimeError(f"required library hash unavailable: {', '.join(missing_required_libraries)}")
                     prompts = make_prompts(port, config)
                     write_json(directory / "prompts.json", prompts)
                     for i in range(config["warmups"]):
